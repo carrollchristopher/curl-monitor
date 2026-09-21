@@ -41,6 +41,8 @@ Requirements: Windows Server or Windows 10/11 with Windows PowerShell 5.1, curl.
 |---|---|
 | `Install-CurlMonitor.ps1` | The installer. Contains the monitor script as an embedded template. |
 | `Test-CurlMonitorHealth.ps1` | Checks the installed monitors: task, process, heartbeat, recorded polls, logs, mail secret, and a live probe. `-OutageDrill` simulates an outage end to end. |
+| `Publish-UptimeTelemetry.ps1` | Summarises what the monitors measured and commits the result to a git working copy. |
+| `Install-TelemetryPublisher.ps1` | Sets up the twice-daily scheduled task that runs the publisher. |
 | `Test-CurlMonitorMailSend.ps1` | One-shot diagnostic for the Graph mail path on an installed server. |
 | `Stress-InstallCurlMonitor.ps1` | Static and functional checks for the installer and the generated monitor, including the wizard, naming, migration, and the sign-in token path against a local mock. |
 | `Stress-WindowsCurlMonitor.ps1` | Live checks on Windows PowerShell 5.1: DPAPI, ACLs, task objects, and the generated monitor running against local listeners and a real endpoint. |
@@ -62,6 +64,45 @@ It changes nothing and ends with WORKING or NOT WORKING CORRECTLY. Every monitor
 ```
 
 The drill makes only that monitor's own probes fail for about a minute, using a curl settings file in the profile of the account the monitor runs as, scoped to the monitored host. Browsers and other programs keep working. It confirms the monitor declares DOWN, sends the DOWN email, records RESOLVED, and sends the RESOLVED email. The drill leaves one short outage in the outage log. If the window is closed during the drill, a one-time cleanup task removes the file, and running the script again removes it immediately.
+
+## Telemetry
+
+The monitors measure a public endpoint continuously. `Publish-UptimeTelemetry.ps1` turns those measurements into a
+published record twice a day, and `Install-TelemetryPublisher.ps1` schedules it.
+
+```powershell
+.\Install-TelemetryPublisher.ps1
+```
+
+It asks for the repository, the working copy, the two run times, and the commit identity, takes a personal access
+token at a hidden prompt, and stores it encrypted with machine-scope DPAPI in a file only SYSTEM and Administrators
+can read. The token never reaches the console, the task definition, or the git remote.
+
+Each run publishes three things into the working copy:
+
+- `data/telemetry/<code>/<yyyy-MM>.csv`, one appended row per run: polls, availability, failed and slow polls,
+  p50, p95 and maximum response time, outages and their length, slow periods, and how many backend addresses
+  answered.
+- `reports/<yyyy-MM-dd>.md`, rewritten each run so the day holds both windows.
+- A table in this README between the telemetry markers, covering the last 24 hours.
+
+Endpoints are published as a code, `ENDPOINT-01` upward, alongside the first 12 characters of the SHA-256 of the
+URL. The map from hash to code lives beside the publish state on the machine that runs the job and is never
+committed, so the data shows what an endpoint did without naming it.
+
+A commit reads like its contents:
+
+```
+telemetry: 2026-09-21 morning window, 1 endpoint, availability 99.86%
+
+ENDPOINT-01: 2519 polls, 99.86% available, p95 412 ms, 1 outage totalling 35s
+```
+
+Install a monitor with `$AlertsEnabled = $false` in the config block for a telemetry-only collector: no mail
+wizard, no alerts, no stored credential, and every poll, outage and slow period still recorded.
+
+<!-- telemetry:start -->
+<!-- telemetry:end -->
 
 ## Testing
 
