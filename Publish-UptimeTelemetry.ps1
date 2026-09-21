@@ -194,7 +194,7 @@ function Get-DropLine {
 
 function New-CommitSubject {
     param([Parameter(Mandatory)][datetime]$Date, [Parameter(Mandatory)][string]$Window, [Parameter(Mandatory)][int]$Count, [Parameter(Mandatory)][double]$Availability)
-    return "telemetry: $($Date.ToString('yyyy-MM-dd')) $($Window.ToLower()) window, $Count endpoint$(if ($Count -eq 1) { '' } else { 's' }), availability $('{0:N2}' -f $Availability)%"
+    return "Feature Improvement: telemetry reporting publisher, data sampling $($Date.ToString('yyyy-MM-dd')) $($Window.ToLower()), availability $('{0:N2}' -f $Availability)%"
 }
 
 function New-CommitBody {

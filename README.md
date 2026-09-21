@@ -93,7 +93,7 @@ committed, so the data shows what an endpoint did without naming it.
 A commit reads like its contents:
 
 ```
-telemetry: 2026-09-21 morning window, 1 endpoint, availability 99.86%
+Feature Improvement: telemetry reporting publisher, data sampling 2026-09-21 morning, availability 99.86%
 
 ENDPOINT-01: 2519 polls, 99.86% available, p95 412 ms, 1 outage totalling 35s
 ```

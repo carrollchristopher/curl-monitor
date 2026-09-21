@@ -1515,7 +1515,7 @@ $readme = "intro`n$ReadmeStartMarker`nold table`n$ReadmeEndMarker`ntail"
 $newReadme = Update-ReadmeTable -Text $readme -Table "| a |`n| b |"
 Check "M4 the README table is replaced between the markers and nothing else moves" ($newReadme -match '(?s)intro.*telemetry:start.*\| a \|.*\| b \|.*telemetry:end.*tail' -and $newReadme -notmatch 'old table' -and (Update-ReadmeTable -Text 'no markers' -Table 'x') -eq 'no markers')
 $subject = New-CommitSubject -Date ([datetime]'2026-09-21') -Window 'Morning' -Count 1 -Availability 99.4
-Check "M4 commit subject reads as a telemetry run" ($subject -eq 'telemetry: 2026-09-21 morning window, 1 endpoint, availability 99.40%' -and (New-CommitSubject -Date ([datetime]'2026-09-21') -Window 'Evening' -Count 3 -Availability 100) -eq 'telemetry: 2026-09-21 evening window, 3 endpoints, availability 100.00%')
+Check "M4 commit subject reads as a telemetry run" ($subject -eq 'Feature Improvement: telemetry reporting publisher, data sampling 2026-09-21 morning, availability 99.40%' -and (New-CommitSubject -Date ([datetime]'2026-09-21') -Window 'Evening' -Count 3 -Availability 100) -eq 'Feature Improvement: telemetry reporting publisher, data sampling 2026-09-21 evening, availability 100.00%')
 $body = New-CommitBody -Measurements @([PSCustomObject]@{ Code = 'ENDPOINT-01'; Stats = $st })
 Check "M4 commit body names each endpoint with its p95 and outage" ($body -match 'ENDPOINT-01: 13 polls, 84\.62% available, p95 \d+ ms, 1 outage totalling 95s')
 $reportRows = @([PSCustomObject]@{ Window='Morning'; WindowEnd_Local='2026-09-21 07:15:00'; Endpoint='ENDPOINT-01'; Polls='120'; AvailabilityPercent='99.17'; P50Ms='210'; P95Ms='480'; MaxMs='900'; FailedPolls='1'; SlowPolls='0'; Outages='0'; TotalOutageSeconds='0'; LongestOutageSeconds='0'; SlowPeriods='0'; FailureReasons='Timed out x1' })
@@ -1548,7 +1548,7 @@ $before = [int](& git.exe -C $work rev-list --count HEAD)
 $rc1 = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $pubPath -RepoPath $work -MonitorRoot $mroot -StatePath $state -Window Morning 2>&1
 $after = [int](& git.exe -C $work rev-list --count HEAD)
 $dataFile = Join-Path $work "data\telemetry\ENDPOINT-01\$($now.ToString('yyyy-MM')).csv"
-Check "M5 a publish commits one change with the telemetry subject and pushes it" ($after -eq $before + 1 -and (& git.exe -C $work log -1 --pretty=%s) -match '^telemetry: \d{4}-\d\d-\d\d morning window, 1 endpoint, availability ' -and (& git.exe -C $bare rev-list --count HEAD) -eq "$after")
+Check "M5 a publish commits one change with the telemetry subject and pushes it" ($after -eq $before + 1 -and (& git.exe -C $work log -1 --pretty=%s) -match '^Feature Improvement: telemetry reporting publisher, data sampling \d{4}-\d\d-\d\d morning, availability ' -and (& git.exe -C $bare rev-list --count HEAD) -eq "$after")
 Check "M5 it writes the data row, the dated report, and the README table" ((Test-Path $dataFile) -and @(Import-Csv $dataFile).Count -eq 1 -and (Import-Csv $dataFile)[0].Polls -eq '40' -and (Test-Path (Join-Path $work "reports\$($now.ToString('yyyy-MM-dd')).md")) -and (Get-Content (Join-Path $work 'README.md') -Raw) -match 'ENDPOINT-01')
 Check "M5 the map and state stay out of the repository" ((Test-Path (Join-Path $state 'endpoint-map.json')) -and (Test-Path (Join-Path $state 'publish-state.json')) -and -not (Test-Path (Join-Path $work 'endpoint-map.json')) -and -not ((& git.exe -C $work log -1 --name-only --pretty=format:) -match 'endpoint-map'))
 Check "M5 the committed data names no URL, and the author is the configured one" (-not ((Get-Content $dataFile -Raw) -match 'example\.com') -and (& git.exe -C $work log -1 --pretty=%an) -eq 'Test Author')
@@ -1574,7 +1574,7 @@ Set-Content (Join-Path $other 'notes.md') -Value 'from elsewhere'
 & git.exe -C $other -c user.name=O -c user.email=o@example.com commit -qm 'unrelated change' | Out-Null
 & git.exe -C $other push -q origin HEAD 2>&1 | Out-Null
 $rc4 = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $pubPath -RepoPath $work -MonitorRoot $mroot -StatePath $state -Window Morning 2>&1
-Check "M8 a non-fast-forward push is rebased and lands, keeping the other commit" ((& git.exe -C $bare log --pretty=%s) -match 'telemetry: ' -and (& git.exe -C $bare log --pretty=%s) -match 'unrelated change' -and ($rc4 -join ' ') -match 'Published and pushed|telemetry: ')
+Check "M8 a non-fast-forward push is rebased and lands, keeping the other commit" ((& git.exe -C $bare log --pretty=%s) -match 'Feature Improvement: telemetry reporting publisher' -and (& git.exe -C $bare log --pretty=%s) -match 'unrelated change' -and ($rc4 -join ' ') -match 'Published and pushed|telemetry: ')
 
 # Dry run writes files and leaves git alone
 $dryWork = Join-Path $tRoot 'dry'
