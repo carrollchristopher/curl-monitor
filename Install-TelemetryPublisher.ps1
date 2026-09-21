@@ -53,6 +53,21 @@ $TokenFileName = 'github-token.bin'
 $SettingsFileName = 'publisher-settings.json'
 $Entropy = 'DIT-CurlMonitor-Telemetry-v1'
 
+function Grant-RepoAccess {
+    # The publisher runs as SYSTEM while an administrator created the working copy. Git rejects a repository whose
+    # owner differs from the account running it, so the path is recorded as safe for SYSTEM and for the installing
+    # administrator, and SYSTEM is given full control of the tree.
+    param([Parameter(Mandatory)][string]$RepoPath)
+    $gitPath = ($RepoPath -replace '\\', '/')
+    $systemConfig = Join-Path $env:SystemRoot 'System32\config\systemprofile\.gitconfig'
+    foreach ($target in @(@{ Args = @('--global'); Env = $null }, @{ Args = @('--file', $systemConfig); Env = $systemConfig })) {
+        $existing = @(& git.exe config @($target.Args) --get-all safe.directory 2>$null)
+        if ($existing -notcontains $gitPath) { & git.exe config @($target.Args) --add safe.directory $gitPath 2>&1 | Out-Null }
+    }
+    & icacls.exe "$RepoPath" /grant "*S-1-5-18:(OI)(CI)F" /T /C 2>&1 | Out-Null
+    Write-Log -Level CREATED -Message "Recorded '$RepoPath' as a safe repository for SYSTEM and granted it full control."
+}
+
 function Write-Log {
     param([Parameter(Mandatory)][ValidateSet('STARTED', 'PROMPT', 'FOUND', 'CREATED', 'SANITY CHECK', 'INFORMATIONAL', 'WARNING', 'FAILED', 'FINISHED')][string]$Level, [Parameter(Mandatory)][string]$Message)
     Write-Host ("{0} {1} | {2}" -f (Get-Date -Format 'MM/dd/yy - hh:mm:ss tt'), $Level, $Message)
@@ -146,7 +161,11 @@ function Set-RepoCredential {
     if (-not (Test-Path -LiteralPath $StoreFile)) { New-Item -Path $StoreFile -ItemType File -Force | Out-Null }
     Set-SecretFileAcl -Path $StoreFile
     Set-Content -LiteralPath $StoreFile -Value $line -Encoding ASCII -Force
-    & git.exe -C $RepoPath config credential.helper "store --file=`"$StoreFile`"" | Out-Null
+    # A machine-wide credential manager would run first and wait on a prompt no one can answer under SYSTEM, so the
+    # helper list is cleared for this working copy and only the stored file is used.
+    & git.exe -C $RepoPath config --unset-all credential.helper 2>&1 | Out-Null
+    & git.exe -C $RepoPath config --add credential.helper "" | Out-Null
+    & git.exe -C $RepoPath config --add credential.helper "store --file=`"$StoreFile`"" | Out-Null
 }
 
 function Install-PublisherTask {
@@ -266,6 +285,7 @@ if (-not $SkipClone) {
         & git.exe -C $RepoPath remote set-url origin $RepoUrl | Out-Null
         Write-Log -Level CREATED -Message "Cloned the repository into '$RepoPath'."
     }
+    Grant-RepoAccess -RepoPath $RepoPath
     Set-RepoCredential -RepoPath $RepoPath -RepoUrl $RepoUrl -Token $Token -StoreFile (Join-Path $StateDir 'git-credentials')
     & git.exe -C $RepoPath config user.name $AuthorName | Out-Null
     & git.exe -C $RepoPath config user.email $AuthorEmail | Out-Null

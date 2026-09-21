@@ -40,8 +40,13 @@ param(
     [string]$MonitorRoot = 'C:\ProgramData\DIT\CurlMonitor',
     [string]$StatePath = 'C:\ProgramData\DIT\Telemetry',
     [ValidateSet('Morning', 'Evening', 'Auto')][string]$Window = 'Auto',
-    [switch]$DryRun
+    [switch]$DryRun,
+    [string]$LogPath = ''
 )
+$env:GIT_TERMINAL_PROMPT = '0'
+$env:GCM_INTERACTIVE = 'never'
+$env:GIT_ASKPASS = ''
+if (-not $LogPath) { $LogPath = Join-Path $StatePath ("publisher_" + (Get-Date -Format 'yyyyMM') + ".log") }
 
 $ReadmeStartMarker = '<!-- telemetry:start -->'
 $ReadmeEndMarker = '<!-- telemetry:end -->'
@@ -50,7 +55,14 @@ $DataColumns = @('WindowEnd_Local', 'Window', 'Endpoint', 'UrlHash', 'Polls', 'A
 function Write-Line {
     param([Parameter(Mandatory)][ValidateSet('INFO', 'DONE', 'WARN', 'FAIL')][string]$Level, [Parameter(Mandatory)][string]$Message)
     $color = @{ INFO = 'Gray'; DONE = 'Green'; WARN = 'Yellow'; FAIL = 'Red' }[$Level]
-    Write-Host ("{0} {1,-4} {2}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message) -ForegroundColor $color
+    $line = "{0} {1,-4} {2}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
+    Write-Host $line -ForegroundColor $color
+    try {
+        $folder = Split-Path -Path $LogPath -Parent
+        if ($folder -and -not (Test-Path $folder)) { New-Item -Path $folder -ItemType Directory -Force | Out-Null }
+        Add-Content -Path $LogPath -Value $line -Encoding UTF8 -ErrorAction Stop
+    }
+    catch { }
 }
 
 function ConvertTo-UrlHash {
