@@ -85,6 +85,7 @@ $MaxBodyBytes          = 8MB                           # curl stops downloading 
 $SlowThresholdMs       = 3000
 $DownThreshold         = 3
 $ReAlertMinutes        = 30
+$AlertsEnabled         = $true                         # $false installs a telemetry-only monitor: no mail wizard, no alerts, data still recorded
 $AlertOnRecovery       = $true
 $AlertOnSlow           = $true                         # Email when the URL stays slow or keeps failing without a full outage
 $SlowWindowMinutes     = 5                             # Rolling window the slow alert looks at
@@ -1529,7 +1530,7 @@ function New-MonitorContent {
         REALERT         = [string][math]::Max(0, [int]$ReAlertMinutes)
         RETENTIONDAYS   = [string][math]::Max(1, [int]$LogRetentionDays)
         ALERTONRECOVERY = (& $b $AlertOnRecovery)
-        SENDEMAIL       = '$true'
+        SENDEMAIL       = (& $b $AlertsEnabled)
         MAILMETHOD      = (& $q $Mail.MailMethod)
         SMTPSERVER      = (& $q $Mail.SmtpServer)
         SMTPPORT        = [string][int]$Mail.SmtpPort
@@ -2564,7 +2565,7 @@ if (-not $summarySent -and $DailySummaryHour -ge 0 -and (Get-Date).Hour -ge $Dai
 }
 Write-Heartbeat -State $state -NowUtc $startUtc -SlowState $slowState
 Wait-NetworkReady -Url $Url | Out-Null
-if ($notice -and $notice.Subject) { Send-AlertOrQueue -Subject $notice.Subject -Body $notice.Body -Kind 'Restart' | Out-Null }
+if ($SendEmail -and $notice -and $notice.Subject) { Send-AlertOrQueue -Subject $notice.Subject -Body $notice.Body -Kind 'Restart' | Out-Null }
 
 try {
     while ($true) {
@@ -2595,7 +2596,7 @@ try {
             elseif ($decision.EmailKind -eq 'Down') { Write-DropLog -Kind 'DOWN' -Message $decision.TransitionLog }
             elseif ($decision.EmailKind -eq 'Reminder') { Write-DropLog -Kind 'REMINDER' -Message $decision.TransitionLog }
             if ($decision.OutageRecord)  { Write-CsvRow -Path $OutageCsv -Row $decision.OutageRecord }
-            if ($decision.EmailSubject) {
+            if ($SendEmail -and $decision.EmailSubject) {
                 $ok = Send-AlertOrQueue -Subject $decision.EmailSubject -Body $decision.EmailBody -Kind $decision.EmailKind
                 if ($ok -and $decision.EmailKind -in @('Down','Reminder')) { $state.AlertDelivered = $true }
             }
@@ -2603,7 +2604,7 @@ try {
             $slow = Update-SlowState -State $slowState -Result $result -Failed $failed -IsDown $state.IsDown -NowUtc ((Get-Date).ToUniversalTime()) -SlowThresholdMs $SlowThresholdMs -WindowMinutes $SlowWindowMinutes -AlertPercent $SlowAlertPercent -ClearPercent $SlowClearPercent -ReAlertMinutes $ReAlertMinutes -AlertOnRecovery $AlertOnRecovery -SiteName $SiteName -Url $Url -HostName $env:COMPUTERNAME -MonitorName $MonitorName
             $slowState = $slow.State
             if ($slow.TransitionLog) { Write-Log -Level ADDED -Message $slow.TransitionLog; Write-DropLog -Kind $slow.DropKind -Message $slow.TransitionLog }
-            if ($AlertOnSlow -and $slow.EmailSubject) {
+            if ($SendEmail -and $AlertOnSlow -and $slow.EmailSubject) {
                 $okSlow = Send-AlertOrQueue -Subject $slow.EmailSubject -Body $slow.EmailBody -Kind $slow.EmailKind
                 if ($okSlow -and $slow.EmailKind -in @('Slow','SlowReminder')) { $slowState.AlertDelivered = $true }
             }
@@ -2625,7 +2626,7 @@ try {
                 $summary = Get-DailySummary -Lines $dropLines -NowLocal (Get-Date) -SlowThresholdMs $SlowThresholdMs -SiteName $SiteName -HostName $env:COMPUTERNAME -Url $Url -MonitorName $MonitorName
                 if ($summary) {
                     Write-Log -Level INFORMATIONAL -Message "Daily summary: $($summary.Subject)"
-                    Send-AlertOrQueue -Subject $summary.Subject -Body $summary.Body -Kind 'Summary' | Out-Null
+                    if ($SendEmail) { Send-AlertOrQueue -Subject $summary.Subject -Body $summary.Body -Kind 'Summary' | Out-Null }
                 }
                 else { Write-Log -Level INFORMATIONAL -Message "Daily summary: no slow or failed polls, outages, or restarts in the last 24 hours. No email." }
             }
@@ -2736,10 +2737,17 @@ if (-not $Url) {
 }
 $ExpectedContentMarker = Get-ContentMarker -SavedDefault $(if ($saved -and $saved.ContentMarker) { [string]$saved.ContentMarker } else { "" })
 
-$mail = Get-MailConfiguration -Saved $saved -SiteName $site -MonitorName $MonitorName
-if (-not $mail) {
-    Write-Log -Level FAILED -Message "Mail configuration incomplete. Nothing was installed. Exiting."
-    exit 1
+if ($AlertsEnabled) {
+    $mail = Get-MailConfiguration -Saved $saved -SiteName $site -MonitorName $MonitorName
+    if (-not $mail) {
+        Write-Log -Level FAILED -Message "Mail configuration incomplete. Nothing was installed. Exiting."
+        exit 1
+    }
+}
+else {
+    # Telemetry only: the monitor records everything it measures and sends nothing
+    Write-Log -Level INFORMATIONAL -Message "Alerts are turned off in this install. No mail is configured and none is sent. Outages, slow periods, and every poll are still recorded."
+    $mail = @{ MailMethod = 'None'; SmtpServer = ''; SmtpPort = 25; SmtpUseSsl = $false; MailFrom = ''; MailTo = @(); SmtpAuthUser = ''; CipherText = ''; GraphTenantId = ''; GraphClientId = ''; GraphSecretExpires = '' }
 }
 
 $monitorPath = Join-Path -Path $InstallDir -ChildPath $MonitorFileName
@@ -2901,7 +2909,7 @@ $reach = Test-EndpointReachable
 if ($reach.Reachable) { Write-Log -Level FOUND -Message "Preflight probe reached '$Url' from '$site' (HTTP $($reach.HttpCode) after $($reach.Redirects) redirect(s))." }
 else { Write-Log -Level WARNING -Message "Preflight probe did not get HTTP 200 from '$site' (got '$($reach.HttpCode)' after $($reach.Redirects) redirect(s), final URL '$($reach.FinalUrl)'). The monitor is installed and will keep trying." }
 
-if ($SendInstallTestEmail) {
+if ($SendInstallTestEmail -and $AlertsEnabled) {
     $cred = $null; $graphSecret = ""
     if ($mail.MailMethod -eq 'Graph' -and $mail.CipherText) {
         $graphSecret = Get-StoredSecret
@@ -2930,11 +2938,16 @@ Write-Host "  Healthy poll    : HTTP 200, at least $MinPopulatedBytes bytes$(if 
 Write-Host "  Task            : $TaskPath$TaskName ($taskState, runs as $RunAsUser at startup)"
 Write-Host "  Monitor         : $monitorPath"
 Write-Host "  Data folder     : $InstallDir  (Latency_yyyyMM.csv, Outages.csv, Drops.log, daily transcripts)"
-Write-Host "  Alerts          : $($mail.MailMethod) from $($mail.MailFrom) to $($mail.MailTo -join ', ')"
-Write-Host "  Down alert      : after $DownThreshold failed polls in a row"
-Write-Host "  Slow alert      : $(if ($AlertOnSlow) { "when $SlowAlertPercent% of polls in $SlowWindowMinutes min are slower than $SlowThresholdMs ms or fail" } else { 'off (slow periods are still logged)' })"
-Write-Host "  Daily summary   : $(if ($DailySummaryHour -ge 0) { "at $('{0:00}' -f $DailySummaryHour):00 when anything was slow or failed" } else { 'off' })"
-if ($mail.MailMethod -eq 'Graph') {
+if ($AlertsEnabled) {
+    Write-Host "  Alerts          : $($mail.MailMethod) from $($mail.MailFrom) to $($mail.MailTo -join ', ')"
+    Write-Host "  Down alert      : after $DownThreshold failed polls in a row"
+    Write-Host "  Slow alert      : $(if ($AlertOnSlow) { "when $SlowAlertPercent% of polls in $SlowWindowMinutes min are slower than $SlowThresholdMs ms or fail" } else { 'off (slow periods are still logged)' })"
+    Write-Host "  Daily summary   : $(if ($DailySummaryHour -ge 0) { "at $('{0:00}' -f $DailySummaryHour):00 when anything was slow or failed" } else { 'off' })"
+}
+else {
+    Write-Host "  Alerts          : off, telemetry only. Outages and slow periods are recorded, no mail is sent."
+}
+if ($AlertsEnabled -and $mail.MailMethod -eq 'Graph') {
     Write-Host "  Tenant ID       : $($mail.GraphTenantId)"
     Write-Host "  Client ID       : $($mail.GraphClientId)"
     Write-Host "  Secret expires  : $(if ($mail.GraphSecretExpires) { $mail.GraphSecretExpires } else { 'not recorded' })"

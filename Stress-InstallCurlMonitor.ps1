@@ -625,7 +625,7 @@ $DailySummaryHour = -9
 $genOff = New-MonitorContent -SiteName 'S' -Mail $mRelay
 $AlertOnSlow, $SlowWindowMinutes, $SlowAlertPercent, $SlowClearPercent, $DailySummaryHour = $saveSlow
 Check "SL12 settings are clamped: window at least 1, clear below alert, hour 23 or off" ($genClamp -match '(?m)^\$AlertOnSlow\s+=\s+\$false$' -and $genClamp -match '(?m)^\$SlowWindowMinutes\s+=\s+1$' -and $genClamp -match '(?m)^\$SlowAlertPercent\s+=\s+5$' -and $genClamp -match '(?m)^\$SlowClearPercent\s+=\s+4$' -and $genClamp -match '(?m)^\$DailySummaryHour\s+=\s+23$' -and $genOff -match '(?m)^\$DailySummaryHour\s+=\s+-1$' -and (ParseOk $genClamp))
-Check "SL13 loop evaluates slowness after the outage decision, gated emails, heartbeat carries it" ($template -match '(?s)\$decision = Update-MonitorState.*?\$slow = Update-SlowState -State \$slowState -Result \$result -Failed \$failed -IsDown \$state\.IsDown' -and $template -match 'if \(\$AlertOnSlow -and \$slow\.EmailSubject\)' -and ([regex]::Matches($template, 'Write-Heartbeat -State \$state -NowUtc [^\r\n]*-SlowState \$slowState')).Count -eq 3 -and $template -match 'Write-DropLog -Kind \$slow\.DropKind -Message \$slow\.TransitionLog')
+Check "SL13 loop evaluates slowness after the outage decision, gated emails, heartbeat carries it" ($template -match '(?s)\$decision = Update-MonitorState.*?\$slow = Update-SlowState -State \$slowState -Result \$result -Failed \$failed -IsDown \$state\.IsDown' -and $template -match 'if \(\$SendEmail -and \$AlertOnSlow -and \$slow\.EmailSubject\)' -and ([regex]::Matches($template, 'Write-Heartbeat -State \$state -NowUtc [^\r\n]*-SlowState \$slowState')).Count -eq 3 -and $template -match 'Write-DropLog -Kind \$slow\.DropKind -Message \$slow\.TransitionLog')
 Check "SL13 daily summary reads the drops log once a day and records the date first" ($template -match '(?s)if \(Test-DailySummaryDue -NowLocal \(Get-Date\) -Hour \$DailySummaryHour -LastSentDate \$summarySent\) \{\s+\$summarySent = \(Get-Date\)\.ToString\(''yyyy-MM-dd''\)\s+try \{ Set-Content -Path \$SummaryStateFile' -and $template -match "Send-AlertOrQueue -Subject \`$summary\.Subject -Body \`$summary\.Body -Kind 'Summary'")
 Check "SL13 slow period carried over at startup unless an outage is" ($template -match 'if \(\$previous -and \$previous\.IsSlow -and \$null -ne \$previous\.SlowStartUtc -and -not \$state\.IsDown\)')
 Check "SL13 alert settings normalised before the first function, so the summary text matches the monitor" ($src -match '(?m)^\$DownThreshold\s+=\s+\[math\]::Max\(1, \[int\]\$DownThreshold\)$' -and $src -match '(?m)^\$SlowWindowMinutes\s+=\s+\[math\]::Max\(1, \[int\]\$SlowWindowMinutes\)$' -and $src -match '(?m)^\$SlowAlertPercent\s+=\s+\[math\]::Min\(100, \[math\]::Max\(1, \[int\]\$SlowAlertPercent\)\)$' -and $src -match '(?m)^\$SlowClearPercent\s+=\s+\[math\]::Max\(0, \[math\]::Min\(\[int\]\$SlowClearPercent, \$SlowAlertPercent - 1\)\)$' -and $src -match '(?m)^\$DailySummaryHour\s+=\s+\[math\]::Min\(23, \[math\]::Max\(-1, \[int\]\$DailySummaryHour\)\)$' -and $src.IndexOf('$DailySummaryHour      = [math]::Min(23') -lt $src.IndexOf('function Write-Log'))
@@ -1443,6 +1443,170 @@ $lBack2.IsSlow = $true; $lBack2.StartUtc = $T0.AddMinutes(-20); $lBack2.StartLoc
 $lBack2.Samples = @(0..19 | ForEach-Object { [PSCustomObject]@{ Utc = $T0.AddMinutes(-4).AddSeconds($_ * 12); LocalStr = 'F'; Slow = $false; Failed = $false; Ms = 200 } })
 $lStep2 = Update-SlowState -State $lBack2 -Result (SlowRes 200) -Failed $false -IsDown $false -NowUtc $T0 -SlowThresholdMs 3000 -WindowMinutes 5 -AlertPercent 50 -ClearPercent 10 -ReAlertMinutes 30 -AlertOnRecovery $true -SiteName 'CapCity' -Url 'http://x' -HostName 'HOST1' -MonitorName 'Demo'
 Check "L12 a period whose last alert is in the future can still clear after the step back" ($lStep2.EmailKind -eq 'SlowResolved' -and -not $lStep2.State.IsSlow)
+
+Section "M. Telemetry: alert-free installs and the uptime publisher"
+$tRoot = Join-Path ([IO.Path]::GetTempPath()) "curlmon_telemetry_$PID"
+if (Test-Path $tRoot) { Remove-Item $tRoot -Recurse -Force }
+New-Item $tRoot -ItemType Directory | Out-Null
+
+# The telemetry-only toggle
+$saveAlerts = $AlertsEnabled
+$AlertsEnabled = $false
+$genQuiet = New-MonitorContent -SiteName 'S' -Mail @{ MailMethod='None'; SmtpServer=''; SmtpPort=25; SmtpUseSsl=$false; MailFrom=''; MailTo=@(); SmtpAuthUser=''; GraphTenantId=''; GraphClientId=''; GraphSecretExpires='' }
+$AlertsEnabled = $saveAlerts
+$genLoud = New-MonitorContent -SiteName 'S' -Mail $mRelay
+Check "M1 alerts off bakes SendEmail false and still parses" ($genQuiet -match '(?m)^\$SendEmail\s+=\s+\$false$' -and (ParseOk $genQuiet) -and $genLoud -match '(?m)^\$SendEmail\s+=\s+\$true$')
+Check "M1 every alert dispatch in the monitor is gated on SendEmail" (([regex]::Matches($template, 'if \(\$SendEmail -and')).Count -ge 3 -and $template -match 'if \(\$SendEmail\) \{ Send-AlertOrQueue -Subject \$summary\.Subject')
+Check "M1 the monitor still records outages, slow periods, and the drops log when alerts are off" ($genQuiet -match "Write-DropLog -Kind 'DOWN'" -and $genQuiet -match 'Write-DropLog -Kind \$slow\.DropKind' -and $genQuiet -match "\$dropKind = 'SLOWSTART'" -and $genQuiet -match 'Write-CsvRow -Path \$OutageCsv' -and $genQuiet -match 'Write-CsvRow -Path \(Get-LatencyCsvPath\)')
+Check "M1 installer skips the mail wizard, the credential, and the install email when alerts are off" ($src -match 'if \(\$AlertsEnabled\) \{\s*\r?\n\s*\$mail = Get-MailConfiguration' -and $src -match "MailMethod = 'None'" -and $src -match 'if \(\$SendInstallTestEmail -and \$AlertsEnabled\)' -and $src -match 'Alerts          : off, telemetry only')
+
+# Publisher functions, loaded from the real script
+$pubPath = 'C:\Workspaces\HST Monitor\Publish-UptimeTelemetry.ps1'
+$pubAst = [System.Management.Automation.Language.Parser]::ParseFile($pubPath, [ref]$null, [ref]$null)
+foreach ($f in $pubAst.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst]}, $false)) { Invoke-Expression $f.Extent.Text }
+$ReadmeStartMarker = '<!-- telemetry:start -->'
+$ReadmeEndMarker = '<!-- telemetry:end -->'
+$DataColumns = @('WindowEnd_Local','Window','Endpoint','UrlHash','Polls','AvailabilityPercent','FailedPolls','SlowPolls','P50Ms','P95Ms','MaxMs','Outages','LongestOutageSeconds','TotalOutageSeconds','SlowPeriods','BackendAddresses','FailureReasons')
+function Write-Line { param($Level, $Message) }
+
+$W0 = [datetime]'2026-09-21T07:15:00'
+$Wfrom = $W0.AddHours(-12)
+function TRow($t, $ms, $code = '200', $ok = 'True', $reason = 'OK', $ip = '10.0.0.1') { [PSCustomObject]@{ Timestamp_Local = $t.ToString('yyyy-MM-dd HH:mm:ss'); HttpCode = $code; ContentOk = $ok; TotalMs = "$ms"; Reason = $reason; RemoteIp = $ip } }
+$rows = @()
+foreach ($i in 1..10) { $rows += TRow $W0.AddMinutes(-$i) (100 * $i) }
+$rows += TRow $W0.AddMinutes(-11) '' '000' 'False' 'Timed out' ''
+$rows += TRow $W0.AddMinutes(-12) '' '503' 'False' 'HTTP 503' '10.0.0.2'
+$rows += TRow $W0.AddMinutes(-13) 4200
+$outs = @([PSCustomObject]@{ OutageStart_Local = $W0.AddMinutes(-12).ToString('yyyy-MM-dd HH:mm:ss'); DurationSeconds = '95' }, [PSCustomObject]@{ OutageStart_Local = $Wfrom.AddHours(-3).ToString('yyyy-MM-dd HH:mm:ss'); DurationSeconds = '900' })
+$drops = @("$($W0.AddMinutes(-13).ToString('yyyy-MM-dd HH:mm:ss')) | SLOWSTART | Declared SLOW", "$($Wfrom.AddHours(-2).ToString('yyyy-MM-dd HH:mm:ss')) | SLOWSTART | older", "garbage")
+$st = Get-TelemetryStat -Rows $rows -Outages $outs -DropLines $drops -From $Wfrom -To $W0 -SlowThresholdMs 3000
+Check "M2 statistics match the hand-computed window" ($st.Polls -eq 13 -and $st.FailedPolls -eq 2 -and $st.AvailabilityPercent -eq 84.62 -and $st.SlowPolls -eq 1 -and $st.MaxMs -eq 4200 -and $st.P50Ms -eq 600 -and $st.BackendAddresses -eq 1 -and $st.Outages -eq 1 -and $st.LongestOutageSeconds -eq 95 -and $st.TotalOutageSeconds -eq 95 -and $st.SlowPeriods -eq 1)
+Check "M2 failure reasons are grouped and ordered" ($st.FailureReasons -match '^(Timed out x1; HTTP 503 x1|HTTP 503 x1; Timed out x1)$')
+$empty = Get-TelemetryStat -Rows @() -Outages @() -DropLines @() -From $Wfrom -To $W0
+Check "M2 an empty window reports zero polls and no percentiles rather than throwing" ($empty.Polls -eq 0 -and $empty.AvailabilityPercent -eq 0 -and $null -eq $empty.P95Ms -and $empty.FailureReasons -eq '')
+$allBad = Get-TelemetryStat -Rows @((TRow $W0.AddMinutes(-1) '' '000' 'False' 'Timed out' ''), (TRow $W0.AddMinutes(-2) '' '000' 'False' 'Timed out' '')) -Outages @() -DropLines @() -From $Wfrom -To $W0
+Check "M2 a window with no successful poll reports 0 percent and null percentiles" ($allBad.Polls -eq 2 -and $allBad.AvailabilityPercent -eq 0 -and $null -eq $allBad.P50Ms -and $null -eq $allBad.MaxMs -and $allBad.FailureReasons -eq 'Timed out x2')
+Check "M2 percentile edges" ((Get-Percentile @(1) 95) -eq 1 -and (Get-Percentile @(1,2) 50) -eq 1 -and (Get-Percentile @(1,2,3,4) 95) -eq 4 -and $null -eq (Get-Percentile @() 50))
+
+# Window reading across a month rollover, and rotated drops logs
+$mDir = Join-Path $tRoot 'monitor-a'
+New-Item $mDir -ItemType Directory | Out-Null
+$hdr = '"Timestamp_Local","HttpCode","ContentOk","TotalMs","Reason","RemoteIp"'
+$aug = @($hdr, '"2026-08-31 23:59:00","200","True","120","OK","10.0.0.1"', '"2026-08-31 20:00:00","200","True","120","OK","10.0.0.1"')
+$sep = @($hdr, '"2026-09-01 00:01:00","200","True","140","OK","10.0.0.1"')
+[IO.File]::WriteAllLines((Join-Path $mDir 'Latency_202608.csv'), [string[]]$aug)
+[IO.File]::WriteAllLines((Join-Path $mDir 'Latency_202609.csv'), [string[]]$sep)
+$roll = Get-TelemetryRow -Folder $mDir -From ([datetime]'2026-08-31T23:00:00') -To ([datetime]'2026-09-01T01:00:00')
+Check "M3 a window spanning a month reads both monthly files and honours its edges" (@($roll).Count -eq 2 -and @($roll | Where-Object { $_.Timestamp_Local -eq '2026-08-31 20:00:00' }).Count -eq 0)
+Set-Content (Join-Path $mDir 'Drops.log') -Value "2026-09-21 07:00:00 | SLOWSTART | current"
+Set-Content (Join-Path $mDir 'Drops_20260920_120000.log') -Value "2026-09-21 02:00:00 | SLOWSTART | rotated"
+$dl = Get-DropLine -Folder $mDir -From ([datetime]'2026-09-21T00:00:00')
+Check "M3 rotated drops logs inside the window are read as well as the current one" (@($dl | Where-Object { $_ -match 'rotated' }).Count -eq 1 -and @($dl | Where-Object { $_ -match 'current' }).Count -eq 1)
+
+# Codes, README markers, commit text, report
+$map = @{}
+$h1 = ConvertTo-UrlHash -Url 'https://example.com/a'
+$h2 = ConvertTo-UrlHash -Url 'https://example.com/b'
+$c1 = Get-EndpointCode -Map $map -UrlHash $h1
+$c2 = Get-EndpointCode -Map $map -UrlHash $h2
+Check "M4 codes are assigned in order, stable per URL, and the hash is 12 hex characters" ($c1 -eq 'ENDPOINT-01' -and $c2 -eq 'ENDPOINT-02' -and (Get-EndpointCode -Map $map -UrlHash $h1) -eq 'ENDPOINT-01' -and $h1 -match '^[0-9a-f]{12}$' -and $h1 -ne $h2 -and $h1 -eq (ConvertTo-UrlHash -Url 'https://example.com/a '))
+Check "M4 no URL, site, or monitor name reaches a published code" ($c1 -notmatch 'example' -and $h1 -notmatch 'example')
+$readme = "intro`n$ReadmeStartMarker`nold table`n$ReadmeEndMarker`ntail"
+$newReadme = Update-ReadmeTable -Text $readme -Table "| a |`n| b |"
+Check "M4 the README table is replaced between the markers and nothing else moves" ($newReadme -match '(?s)intro.*telemetry:start.*\| a \|.*\| b \|.*telemetry:end.*tail' -and $newReadme -notmatch 'old table' -and (Update-ReadmeTable -Text 'no markers' -Table 'x') -eq 'no markers')
+$subject = New-CommitSubject -Date ([datetime]'2026-09-21') -Window 'Morning' -Count 1 -Availability 99.4
+Check "M4 commit subject reads as a telemetry run" ($subject -eq 'telemetry: 2026-09-21 morning window, 1 endpoint, availability 99.40%' -and (New-CommitSubject -Date ([datetime]'2026-09-21') -Window 'Evening' -Count 3 -Availability 100) -eq 'telemetry: 2026-09-21 evening window, 3 endpoints, availability 100.00%')
+$body = New-CommitBody -Measurements @([PSCustomObject]@{ Code = 'ENDPOINT-01'; Stats = $st })
+Check "M4 commit body names each endpoint with its p95 and outage" ($body -match 'ENDPOINT-01: 13 polls, 84\.62% available, p95 \d+ ms, 1 outage totalling 95s')
+$reportRows = @([PSCustomObject]@{ Window='Morning'; WindowEnd_Local='2026-09-21 07:15:00'; Endpoint='ENDPOINT-01'; Polls='120'; AvailabilityPercent='99.17'; P50Ms='210'; P95Ms='480'; MaxMs='900'; FailedPolls='1'; SlowPolls='0'; Outages='0'; TotalOutageSeconds='0'; LongestOutageSeconds='0'; SlowPeriods='0'; FailureReasons='Timed out x1' })
+$report = New-TelemetryReport -Date ([datetime]'2026-09-21') -Rows $reportRows
+Check "M4 the report carries the date, the window, the table, and the failure note" ($report -match '# Endpoint availability, 2026-09-21' -and $report -match '## Morning window, measured to 2026-09-21 07:15:00' -and $report -match '\| ENDPOINT-01 \| 120 \| 99\.17% \| 210 ms \| 480 ms \| 900 ms \| 1 \| 0 \| 0 \|' -and $report -match 'ENDPOINT-01 failures: Timed out x1\.')
+
+# Full publish against a local bare repository
+$savedEap = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'   # git writes ordinary progress to stderr, which would otherwise end the run
+$bare = Join-Path $tRoot 'origin.git'
+$work = Join-Path $tRoot 'work'
+$state = Join-Path $tRoot 'state'
+$mroot = Join-Path $tRoot 'monitors'
+New-Item (Join-Path $mroot 'site-a') -ItemType Directory -Force | Out-Null
+$now = Get-Date
+Set-Content (Join-Path $mroot 'site-a\install-settings.json') -Value (@{ MonitorName='Site A'; SiteName='S'; Url='https://example.com/a' } | ConvertTo-Json)
+Copy-Item (Join-Path $mDir 'Latency_202609.csv') (Join-Path $mroot "site-a\Latency_$($now.ToString('yyyyMM')).csv")
+$recent = @($hdr) + @(1..40 | ForEach-Object { '"' + $now.AddMinutes(-$_).ToString('yyyy-MM-dd HH:mm:ss') + '","200","True","' + (100 + $_) + '","OK","10.0.0.1"' })
+[IO.File]::WriteAllLines((Join-Path $mroot "site-a\Latency_$($now.ToString('yyyyMM')).csv"), [string[]]$recent)
+Set-Content (Join-Path $mroot 'site-a\Watch-CurlMonitor.ps1') -Value "`$SlowThresholdMs       = 3000`nfunction x { }"
+& git.exe init --bare -q $bare
+& git.exe clone -q $bare $work 2>&1 | Out-Null
+Set-Content (Join-Path $work 'README.md') -Value "# repo`n`n$ReadmeStartMarker`n$ReadmeEndMarker`n"
+& git.exe -C $work add . | Out-Null
+& git.exe -C $work -c user.name=T -c user.email=t@example.com commit -qm 'init' | Out-Null
+& git.exe -C $work push -q origin HEAD 2>&1 | Out-Null
+& git.exe -C $work config user.name 'Test Author' | Out-Null
+& git.exe -C $work config user.email 'test@example.com' | Out-Null
+$before = [int](& git.exe -C $work rev-list --count HEAD)
+$rc1 = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $pubPath -RepoPath $work -MonitorRoot $mroot -StatePath $state -Window Morning 2>&1
+$after = [int](& git.exe -C $work rev-list --count HEAD)
+$dataFile = Join-Path $work "data\telemetry\ENDPOINT-01\$($now.ToString('yyyy-MM')).csv"
+Check "M5 a publish commits one change with the telemetry subject and pushes it" ($after -eq $before + 1 -and (& git.exe -C $work log -1 --pretty=%s) -match '^telemetry: \d{4}-\d\d-\d\d morning window, 1 endpoint, availability ' -and (& git.exe -C $bare rev-list --count HEAD) -eq "$after")
+Check "M5 it writes the data row, the dated report, and the README table" ((Test-Path $dataFile) -and @(Import-Csv $dataFile).Count -eq 1 -and (Import-Csv $dataFile)[0].Polls -eq '40' -and (Test-Path (Join-Path $work "reports\$($now.ToString('yyyy-MM-dd')).md")) -and (Get-Content (Join-Path $work 'README.md') -Raw) -match 'ENDPOINT-01')
+Check "M5 the map and state stay out of the repository" ((Test-Path (Join-Path $state 'endpoint-map.json')) -and (Test-Path (Join-Path $state 'publish-state.json')) -and -not (Test-Path (Join-Path $work 'endpoint-map.json')) -and -not ((& git.exe -C $work log -1 --name-only --pretty=format:) -match 'endpoint-map'))
+Check "M5 the committed data names no URL, and the author is the configured one" (-not ((Get-Content $dataFile -Raw) -match 'example\.com') -and (& git.exe -C $work log -1 --pretty=%an) -eq 'Test Author')
+
+# A second run in the same window appends rather than duplicating the file, and the report keeps both
+$rc2 = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $pubPath -RepoPath $work -MonitorRoot $mroot -StatePath $state -Window Evening 2>&1
+Check "M6 the same endpoint keeps its code, so a second run appends instead of starting a new folder" (@(Get-ChildItem (Join-Path $work 'data\telemetry') -Directory).Count -eq 1 -and (Get-Content (Join-Path $state 'endpoint-map.json') -Raw) -match 'ENDPOINT-01')
+Check "M6 a second window appends one row under the same header and commits again" (@(Import-Csv $dataFile).Count -eq 2 -and @(Get-Content $dataFile | Where-Object { $_ -match 'WindowEnd_Local' }).Count -eq 1 -and [int](& git.exe -C $work rev-list --count HEAD) -eq $after + 1)
+Check "M6 the day's report holds both windows" ((Get-Content (Join-Path $work "reports\$($now.ToString('yyyy-MM-dd')).md") -Raw) -match '(?s)## Morning window.*## Evening window')
+
+# Nothing to publish makes no commit
+$emptyRoot = Join-Path $tRoot 'no-monitors'
+New-Item $emptyRoot -ItemType Directory | Out-Null
+$countBefore = [int](& git.exe -C $work rev-list --count HEAD)
+$rc3 = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $pubPath -RepoPath $work -MonitorRoot $emptyRoot -StatePath $state 2>&1
+Check "M7 no monitor data makes no commit and reports it" ([int](& git.exe -C $work rev-list --count HEAD) -eq $countBefore -and ($rc3 -join ' ') -match 'Nothing published')
+
+# A push rejected by someone else's commit is recovered by the rebase
+$other = Join-Path $tRoot 'other'
+& git.exe clone -q $bare $other 2>&1 | Out-Null
+Set-Content (Join-Path $other 'notes.md') -Value 'from elsewhere'
+& git.exe -C $other add . | Out-Null
+& git.exe -C $other -c user.name=O -c user.email=o@example.com commit -qm 'unrelated change' | Out-Null
+& git.exe -C $other push -q origin HEAD 2>&1 | Out-Null
+$rc4 = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $pubPath -RepoPath $work -MonitorRoot $mroot -StatePath $state -Window Morning 2>&1
+Check "M8 a non-fast-forward push is rebased and lands, keeping the other commit" ((& git.exe -C $bare log --pretty=%s) -match 'telemetry: ' -and (& git.exe -C $bare log --pretty=%s) -match 'unrelated change' -and ($rc4 -join ' ') -match 'Published and pushed|telemetry: ')
+
+# Dry run writes files and leaves git alone
+$dryWork = Join-Path $tRoot 'dry'
+& git.exe clone -q $bare $dryWork 2>&1 | Out-Null
+$dryBefore = [int](& git.exe -C $dryWork rev-list --count HEAD)
+$rc5 = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $pubPath -RepoPath $dryWork -MonitorRoot $mroot -StatePath (Join-Path $tRoot 'state2') -Window Morning -DryRun 2>&1
+Check "M9 a dry run writes the files but commits nothing" ([int](& git.exe -C $dryWork rev-list --count HEAD) -eq $dryBefore -and (Test-Path (Join-Path $dryWork 'data\telemetry')) -and ($rc5 -join ' ') -match 'Dry run' -and (& git.exe -C $dryWork status --porcelain) -match 'data/telemetry')
+
+# The publisher installer, driven into scratch paths, never reaching GitHub
+$pubInstaller = 'C:\Workspaces\HST Monitor\Install-TelemetryPublisher.ps1'
+$instState = Join-Path $tRoot 'installer-state'
+$taskPathTest = '\CurlMonitorTest\'
+$taskNameTest = 'Curl Monitor telemetry publisher test'
+$instOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $pubInstaller -NonInteractive -SkipClone -StateDir $instState -RepoPath $work -MonitorRoot $mroot -TaskPath $taskPathTest -TaskName $taskNameTest -RepoUrl 'https://github.com/owner/repo' -AuthorName 'Test Author' -AuthorEmail 'test@example.com' -Token 'ghp_testtoken_value_0123456789' 2>&1
+$tokenFile = Join-Path $instState 'github-token.bin'
+$instTask = Get-ScheduledTask -TaskPath $taskPathTest -TaskName $taskNameTest -ErrorAction SilentlyContinue
+$acl = if (Test-Path $tokenFile) { @((Get-Acl $tokenFile).Access | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } | Sort-Object -Unique) } else { @() }
+foreach ($f in $pubAst.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst]}, $false)) { }
+$instAst = [System.Management.Automation.Language.Parser]::ParseFile($pubInstaller, [ref]$null, [ref]$null)
+foreach ($f in $instAst.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in @('Unprotect-Token','New-AuthenticatedUrl','Test-RepoUrl','Test-TimeOfDay','Test-EmailLike')}, $false)) { Invoke-Expression $f.Extent.Text }
+$Entropy = 'DIT-CurlMonitor-Telemetry-v1'
+Check "M10 the token is stored encrypted, readable back, and locked to SYSTEM and Administrators" ((Test-Path $tokenFile) -and (Unprotect-Token -Path $tokenFile) -eq 'ghp_testtoken_value_0123456789' -and -not ((Get-Content $tokenFile -Raw) -match 'ghp_testtoken') -and (($acl -join ',') -eq 'S-1-5-18,S-1-5-32-544'))
+Check "M10 the task runs as SYSTEM twice a day and catches up a missed run" ($instTask -and @($instTask.Triggers).Count -eq 2 -and "$($instTask.Principal.UserId)" -match 'SYSTEM' -and $instTask.Settings.StartWhenAvailable -and "$(@($instTask.Actions)[0].Arguments)" -match 'Publish-UptimeTelemetry\.ps1')
+Check "M10 the token reaches neither the console, the task definition, nor the settings file" (-not (($instOut -join ' ') -match 'ghp_testtoken') -and -not ("$(@($instTask.Actions)[0].Arguments)" -match 'ghp_testtoken') -and -not ((Get-Content (Join-Path $instState 'publisher-settings.json') -Raw) -match 'ghp_testtoken'))
+Check "M10 input validation refuses a bad repository URL, time, or email" ((Test-RepoUrl 'https://github.com/owner/repo') -and -not (Test-RepoUrl 'git@github.com:owner/repo.git') -and -not (Test-RepoUrl 'ftp://x/y/z') -and (Test-TimeOfDay '07:15') -and -not (Test-TimeOfDay '25:00') -and (Test-EmailLike 'a@b.co') -and -not (Test-EmailLike 'nope'))
+Check "M10 the authenticated URL is only ever built in memory, never stored in the clone" ((New-AuthenticatedUrl -RepoUrl 'https://github.com/o/r' -Token 'T') -eq 'https://x-access-token:T@github.com/o/r' -and -not ((& git.exe -C $work config --get remote.origin.url) -match 'x-access-token'))
+if ($instTask) { Unregister-ScheduledTask -TaskPath $taskPathTest -TaskName $taskNameTest -Confirm:$false -ErrorAction SilentlyContinue }
+try { $svc = New-Object -ComObject Schedule.Service; $svc.Connect(); $svc.GetFolder('\').DeleteFolder('CurlMonitorTest', 0) } catch { }
+Check "M10 the test task is gone again" ($null -eq (Get-ScheduledTask -TaskPath $taskPathTest -TaskName $taskNameTest -ErrorAction SilentlyContinue))
+$ErrorActionPreference = $savedEap
+Remove-Item $tRoot -Recurse -Force -ErrorAction SilentlyContinue
+
 
 Write-Host ""
 Write-Host "TOTAL: $script:pass passed, $script:fail failed"
