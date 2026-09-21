@@ -1,0 +1,4 @@
+"WindowEnd_Local","Window","Endpoint","UrlHash","Polls","AvailabilityPercent","FailedPolls","SlowPolls","P50Ms","P95Ms","MaxMs","Outages","LongestOutageSeconds","TotalOutageSeconds","SlowPeriods","BackendAddresses","FailureReasons"
+"2026-09-21 12:26:14","Evening","ENDPOINT-01","b83b5c8fa601","4","100","0","0","165","221","221","0","0","0","0","1",""
+"2026-09-21 12:34:04","Evening","ENDPOINT-01","b83b5c8fa601","49","100","0","0","171","267","324","0","0","0","0","3",""
+"2026-09-21 12:35:12","Evening","ENDPOINT-01","b83b5c8fa601","56","100","0","0","169","267","324","0","0","0","0","3",""

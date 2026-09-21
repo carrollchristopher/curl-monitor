@@ -1,4 +1,4 @@
-# curl-monitor
+﻿# curl-monitor
 
 Always-on availability monitor for any URL, installed on a server at the site that depends on it. It runs as a SYSTEM scheduled task, polls the URL through its redirects with curl, and emails when the site loses access, when it stays slow, when it comes back, and when the monitor itself was not running.
 
@@ -102,6 +102,11 @@ Install a monitor with `$AlertsEnabled = $false` in the config block for a telem
 wizard, no alerts, no stored credential, and every poll, outage and slow period still recorded.
 
 <!-- telemetry:start -->
+Last 24 hours, measured to 2026-09-21 12:35 local.
+
+| Endpoint | Polls | Available | p50 | p95 | Outages |
+|---|---:|---:|---:|---:|---:|
+| ENDPOINT-01 | 109 | 100% | 171 ms | 267 ms | 0 |
 <!-- telemetry:end -->
 
 ## Testing
