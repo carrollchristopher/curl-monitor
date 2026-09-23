@@ -4,3 +4,5 @@ Get-EntraSignIn.ps1
 .vscode/
 *.log
 *.tmp
+*.docx
+~$*

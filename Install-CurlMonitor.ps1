@@ -53,7 +53,7 @@
 Remove-Variable * -ErrorAction SilentlyContinue
 
 # Deployment locations. Each monitor gets its own folder under the root and its own scheduled task.
-$InstallRoot           = "C:\ProgramData\DIT\CurlMonitor"
+$InstallRoot           = "C:\ProgramData\CurlMonitor"
 $InstallDir            = $InstallRoot                  # Replaced with the monitor's own folder once its name is known
 $MonitorFileName       = "Watch-CurlMonitor.ps1"
 $SettingsFileName      = "install-settings.json"
@@ -61,15 +61,17 @@ $CredentialFileName    = "credential.bin"
 $TaskNamePrefix        = "Curl Monitor - "
 $MaxTaskNameLength     = 238                           # Task Scheduler limit, checked before anything is written
 $TaskName              = $TaskNamePrefix               # Completed with the monitor name once it is known
-$TaskPath              = "\DIT\"
+$TaskPath              = "\CurlMonitor\"
 $RunAsUser             = "SYSTEM"
 $RestartCount          = 3
 $RestartMinutes        = 1
 
-# An older HST-only install is migrated into the layout above and then removed
+# Earlier layouts, migrated into the one above and then removed
 $LegacyInstallDir      = "C:\ProgramData\DIT\HSTProbe"
 $LegacyTaskName        = "HST eChart Monitor"
 $LegacyMonitorName     = "HST eChart"
+$PreviousRoot          = "C:\ProgramData\DIT\CurlMonitor"   # Where monitors lived before the DIT folder was dropped
+$PreviousTaskPath      = "\DIT\"
 
 # Prompted every run, prefilled from the last one. In non-interactive mode these are used as-is.
 $MonitorName           = ""                            # For example "HST eChart". Names the folder, the task, and the alerts.
@@ -112,7 +114,7 @@ $SmtpAuthUser          = ""                            # Authenticated only. Pas
 # Installer behavior
 $Action                = "Install"                     # Install or Uninstall. Interactive runs ask; non-interactive runs use this.
 $KeepHistoryOnUninstall = $true                        # Uninstall: $true moves the latency CSVs, outages, and drops log aside first
-$HistoryKeepRoot       = "C:\ProgramData\DIT\CurlMonitor-history"
+$HistoryKeepRoot       = "C:\ProgramData\CurlMonitor-history"
 $TelemetryTaskName     = "Curl Monitor telemetry publisher"
 $NonInteractive        = $false                        # $true = no prompts, use the config block, for RMM deployment
 $SiteNameOverride      = ""                            # Used when non-interactive, otherwise prompted
@@ -204,6 +206,15 @@ function Read-Choice {
     }
 }
 
+function Write-Question {
+    # One wizard question: a blank line, the question, and at most a couple of short lines under it
+    param([Parameter(Mandatory)][string]$Question, [string[]]$Hint = @())
+    if ($NonInteractive) { return }
+    Write-Host ""
+    Write-Host $Question -ForegroundColor White
+    foreach ($line in @($Hint)) { if ($line) { Write-Host "  $line" -ForegroundColor DarkGray } }
+}
+
 function Read-PortSetting {
     # Prompts for a TCP port until a valid one is entered. Returns $null only in non-interactive mode with a bad default.
     param([Parameter(Mandatory)][string]$Prompt, [Parameter(Mandatory)][int]$Default)
@@ -283,14 +294,13 @@ function Get-SiteName {
         return $clean
     }
     while ($true) {
-        Write-Log -Level PROMPT -Message "Enter the site name for this server. It appears in every alert subject."
-        $typed = Read-Setting -Prompt "Site name" -Default $default
+        Write-Question -Question "Site name" -Hint "Where this server sits. It appears in every alert subject."
+        $typed = Read-Setting -Prompt "Site" -Default $default
         $clean = ConvertTo-SafeSiteName $typed
         if (-not $clean) { Write-Log -Level WARNING -Message "Site name cannot be empty after cleanup."; continue }
         if ($clean -ne $typed.Trim()) {
             if ((Read-Choice -Prompt "Cleaned to '$clean'. Use it?" -Allowed @('Y','N') -Default 'Y') -ne 'Y') { continue }
         }
-        Write-Log -Level FOUND -Message "Site name set to '$clean'."
         return $clean
     }
 }
@@ -1037,12 +1047,11 @@ function Get-MailConfiguration {
 
     while ($true) {
         if (-not $NonInteractive) {
-            Write-Host ""
-            Write-Log -Level PROMPT -Message "Mail setup. Choose how alerts are sent:"
-            Write-Host "  1  Microsoft Graph (recommended: HTTPS only, no port 25, no SPF. First site creates the app registration and shared mailbox here; later sites paste Tenant ID, Client ID, secret)"
-            Write-Host "  2  M365 Direct Send (no password, port 25 to the tenant MX host, recipients in tenant, site IP in SPF, RejectDirectSend must be off)"
-            Write-Host "  3  Internal SMTP relay (no password, an on-prem Exchange or relay that allows this server's IP)"
-            Write-Host "  4  Username + password SMTP (for example smtp.office365.com:587 TLS. Basic auth disabled by default by Microsoft end of December 2026)"
+            Write-Question -Question "How should alerts be sent?"
+            Write-Host "  1  Microsoft 365 Graph. HTTPS only, no port 25. The first site creates the app and the shared mailbox; later sites paste its three values."
+            Write-Host "  2  Microsoft 365 direct send. Port 25 to the tenant, recipients inside the tenant, this server's IP in SPF."
+            Write-Host "  3  Internal relay. An on-prem Exchange or relay that accepts this server's IP."
+            Write-Host "  4  SMTP with a username and password."
         }
         $methodMap = @{ '1' = 'Graph'; '2' = 'DirectSend'; '3' = 'Relay'; '4' = 'Authenticated' }
         $defKey = ($methodMap.GetEnumerator() | Where-Object { $_.Value -eq $defMethod } | Select-Object -First 1).Key
@@ -1300,12 +1309,15 @@ function Get-MonitorName {
         return $clean
     }
     if (@($Existing).Count -gt 0) {
-        Write-Log -Level FOUND -Message "Monitors already installed on this server: $((@($Existing) | ForEach-Object { "$($_.Name) -> $($_.Url)" }) -join '; ')."
-        Write-Log -Level INFORMATIONAL -Message "Type one of those names to upgrade it, or a new name to add another monitor beside it."
+        Write-Host ""
+        Write-Host "Already installed here"
+        foreach ($m in @($Existing)) { Write-Host ("  {0}  {1}" -f $m.Name, $(if ($m.Url) { $m.Url } else { 'URL not recorded' })) }
     }
+    $hint = @("Names its folder, its task, and every alert subject. For example: HST eChart")
+    if (@($Existing).Count -gt 0) { $hint += "One of the names above upgrades that monitor. A new name adds another beside it." }
     while ($true) {
-        Write-Log -Level PROMPT -Message "Name this monitor, for example 'HST eChart'. It names its folder, its task, and every alert subject."
-        $typed = Read-Setting -Prompt "Monitor name" -Default $default
+        Write-Question -Question "Monitor name" -Hint $hint
+        $typed = Read-Setting -Prompt "Name" -Default $default
         $clean = ConvertTo-SafeSiteName $typed
         if (-not $clean) { Write-Log -Level WARNING -Message "Monitor name cannot be empty after cleanup."; continue }
         if (-not (ConvertTo-MonitorSlug $clean)) { Write-Log -Level WARNING -Message "Monitor name needs at least one letter or digit."; continue }
@@ -1323,7 +1335,6 @@ function Get-MonitorName {
             Write-Log -Level FOUND -Message "Upgrading the installed monitor '$($clash.Name)'."
             return $clash.Name
         }
-        Write-Log -Level FOUND -Message "Monitor '$clean' goes in '$(Join-Path $InstallRoot (ConvertTo-MonitorSlug $clean))'."
         return $clean
     }
 }
@@ -1369,9 +1380,9 @@ function Get-MonitorUrl {
         return ""
     }
     while ($true) {
-        Write-Log -Level PROMPT -Message "Enter the URL this monitor watches. curl.exe requests it every $IntervalSeconds s and follows up to $MaxRedirects redirects."
+        Write-Question -Question "URL to watch" -Hint "Requested every $IntervalSeconds seconds, following up to $MaxRedirects redirects."
         $typed = Read-Setting -Prompt "URL" -Default $default
-        if (Test-MonitorUrl $typed) { Write-Log -Level FOUND -Message "Watching '$($typed.Trim())'."; return $typed.Trim() }
+        if (Test-MonitorUrl $typed) { return $typed.Trim() }
         Write-Log -Level WARNING -Message "Enter a full URL starting with http:// or https://."
     }
 }
@@ -1381,25 +1392,24 @@ function Get-ContentMarker {
     param([string]$SavedDefault = "")
     if ($NonInteractive) { return [string]$(if ($ExpectedContentMarker) { $ExpectedContentMarker } elseif ($SavedDefault) { $SavedDefault } else { '' }) }
     $default = if ($SavedDefault) { $SavedDefault } else { $ExpectedContentMarker }
+    $hint = @("Words from the page, so a login page that loads but comes back wrong still counts as down.",
+              "Blank accepts any page that returns HTTP 200.")
+    $label = "Text"
     if ($default) {
-        Write-Log -Level PROMPT -Message "Text that must appear on the page for the poll to count as healthy. Enter keeps '$default'. Type - to drop the text check, so a healthy poll is HTTP 200 with at least $MinPopulatedBytes bytes."
-        $label = "Required text (Enter = keep '$default', - = no text check)"
+        $hint += "Enter keeps '$default'. A single - drops the check."
+        $label = "Text (- to drop)"
     }
-    else {
-        Write-Log -Level PROMPT -Message "Text that must appear on the page for the poll to count as healthy, for example a title. Leave blank to check only the HTTP status and that the page is at least $MinPopulatedBytes bytes."
-        $label = "Required text (blank for none)"
-    }
+    Write-Question -Question "Text the page must contain (optional)" -Hint $hint
     $typed = Read-Setting -Prompt $label -Default $default
     $typed = "$typed".Trim()
     if ($typed -eq '-') { $typed = '' }
-    if ($typed) { Write-Log -Level FOUND -Message "A healthy poll must contain '$typed'." }
-    else { Write-Log -Level FOUND -Message "No text check. A healthy poll is HTTP 200 with at least $MinPopulatedBytes bytes." }
     return $typed
 }
 
 function Get-LegacyInstall {
-    # Finds an older HST-only install, returning its folder, task, and saved settings, or $null
-    param([string]$Dir = $LegacyInstallDir, [string]$TaskName = $LegacyTaskName, [string]$Path = $TaskPath)
+    # Finds an older HST-only install, returning its folder, task, and saved settings, or $null. That layout
+    # always kept its task in the old folder, so $PreviousTaskPath is where it is looked for.
+    param([string]$Dir = $LegacyInstallDir, [string]$TaskName = $LegacyTaskName, [string]$Path = $PreviousTaskPath)
     $settingsPath = Join-Path $Dir $SettingsFileName
     $task = Get-ScheduledTask -TaskName $TaskName -TaskPath $Path -ErrorAction SilentlyContinue
     $hasFiles = (Test-Path $settingsPath) -or (Test-Path (Join-Path $Dir 'Watch-HSTeChartUptime.ps1'))
@@ -1501,6 +1511,140 @@ function Invoke-LegacyMigration {
     }
 }
 
+function Register-MonitorTask {
+    # Registers or replaces a monitor's task. Shared by the install and by the move out of the old location.
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$ScriptPath)
+    $action      = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ScriptPath`""
+    $trigger     = New-ScheduledTaskTrigger -AtStartup
+    $settingsSet = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -RestartCount $RestartCount -RestartInterval (New-TimeSpan -Minutes $RestartMinutes) -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -DontStopOnIdleEnd
+    $principal   = New-ScheduledTaskPrincipal -UserId $RunAsUser -LogonType ServiceAccount -RunLevel Highest
+    Register-ScheduledTask -TaskName $Name -TaskPath $Path -Action $action -Trigger $trigger -Settings $settingsSet -Principal $principal -Force -ErrorAction Stop | Out-Null
+    # CIM cmdlets can report failure without throwing, so confirm the task actually exists before claiming success
+    if (-not (Get-ScheduledTask -TaskName $Name -TaskPath $Path -ErrorAction Stop)) { throw "The task was not found after registration." }
+}
+
+function Get-PreviousRootMonitor {
+    # Monitors still installed where they lived before the parent folder was dropped
+    param([string]$Root = $PreviousRoot, [string]$Path = $PreviousTaskPath, [string]$Prefix = $TaskNamePrefix, [string]$NewRoot = $InstallRoot)
+    $found = @()
+    if (-not $Root -or $Root -eq $NewRoot) { return $found }
+    foreach ($m in @(Get-InstalledMonitor -Root $Root)) {
+        $taskName = $Prefix + $m.Name
+        $task = Get-ScheduledTask -TaskName $taskName -TaskPath $Path -ErrorAction SilentlyContinue
+        $found += [PSCustomObject]@{
+            Name = $m.Name; Slug = $m.Slug; Dir = $m.Path; Url = $m.Url
+            TaskName = $taskName; TaskPath = $Path; HasTask = [bool]$task
+        }
+    }
+    return $found
+}
+
+function Move-MonitorToNewRoot {
+    # Moves one monitor out of the old location: stops its task, moves the folder, repoints the paths baked into
+    # its script, and registers the task again under the new folder. If the move fails the old task goes back, so
+    # the server is never left with nothing watching.
+    param([Parameter(Mandatory)]$Monitor, [string]$NewRoot = $InstallRoot, [string]$NewTaskPath = $TaskPath)
+    $dest = Join-Path $NewRoot $Monitor.Slug
+    if (Test-Path -LiteralPath $dest) {
+        Write-Log -Level WARNING -Message "'$dest' already exists, so '$($Monitor.Name)' stays at '$($Monitor.Dir)'. Remove one of the two with the uninstall option, then run this again."
+        return $false
+    }
+    $oldScript = Join-Path $Monitor.Dir $MonitorFileName
+    $hadTask = $false
+    if ($Monitor.HasTask -and (Get-ScheduledTask -TaskName $Monitor.TaskName -TaskPath $Monitor.TaskPath -ErrorAction SilentlyContinue)) {
+        $hadTask = $true
+        try { Stop-ScheduledTask -TaskName $Monitor.TaskName -TaskPath $Monitor.TaskPath -ErrorAction SilentlyContinue } catch { }
+        for ($i = 0; $i -lt 15; $i++) {
+            $t = Get-ScheduledTask -TaskName $Monitor.TaskName -TaskPath $Monitor.TaskPath -ErrorAction SilentlyContinue
+            if (-not $t -or "$($t.State)" -ne 'Running') { break }
+            Start-Sleep -Seconds 1
+        }
+        try { Unregister-ScheduledTask -TaskName $Monitor.TaskName -TaskPath $Monitor.TaskPath -Confirm:$false -ErrorAction Stop }
+        catch {
+            Write-Log -Level WARNING -Message "Could not remove the old task '$($Monitor.TaskPath)$($Monitor.TaskName)', so '$($Monitor.Name)' stays where it is. $($_.Exception.Message)"
+            return $false
+        }
+    }
+    $null = Stop-MonitorProcess -Dir $Monitor.Dir
+    # The monitor reports its own restarts, so record that this stop was deliberate
+    $hb = Join-Path $Monitor.Dir 'heartbeat.json'
+    if (Test-Path -LiteralPath $hb) {
+        try {
+            $doc = Get-Content -Path $hb -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            $doc | Add-Member -NotePropertyName Stopped -NotePropertyValue $true -Force
+            $doc | ConvertTo-Json -Compress | Set-Content -Path $hb -Encoding UTF8 -Force
+        }
+        catch { Remove-Item -Path $hb -Force -ErrorAction SilentlyContinue }
+    }
+    try { Move-Item -LiteralPath $Monitor.Dir -Destination $dest -ErrorAction Stop }
+    catch {
+        Write-Log -Level WARNING -Message "Could not move '$($Monitor.Dir)'. $($_.Exception.Message)"
+        if ($hadTask) {
+            try {
+                Register-MonitorTask -Name $Monitor.TaskName -Path $Monitor.TaskPath -ScriptPath $oldScript
+                Start-ScheduledTask -TaskName $Monitor.TaskName -TaskPath $Monitor.TaskPath -ErrorAction SilentlyContinue
+                Write-Log -Level INFORMATIONAL -Message "'$($Monitor.Name)' is running again from '$($Monitor.Dir)'."
+            }
+            catch { Write-Log -Level FAILED -Message "'$($Monitor.Name)' is not running any more. Re-run the installer and give it the same name." }
+        }
+        return $false
+    }
+    $script = Join-Path $dest $MonitorFileName
+    if (Test-Path -LiteralPath $script) {
+        try {
+            $text = Get-Content -LiteralPath $script -Raw -ErrorAction Stop
+            $moved = $text.Replace($Monitor.Dir, $dest)
+            [ScriptBlock]::Create($moved) | Out-Null
+            Set-Content -LiteralPath $script -Value $moved -Encoding UTF8 -Force -ErrorAction Stop
+        }
+        catch { Write-Log -Level WARNING -Message "Could not repoint '$script' at its new folder. Re-run the installer with this monitor's name to rebuild it. $($_.Exception.Message)" }
+    }
+    try { Protect-InstallFolder -Path $dest } catch { Write-Log -Level WARNING -Message "Moved '$($Monitor.Name)' but could not lock '$dest'. $($_.Exception.Message)" }
+    $cred = Join-Path $dest $CredentialFileName
+    if (Test-Path -LiteralPath $cred) { & icacls.exe "$cred" /inheritance:r /grant:r "*S-1-5-18:(F)" "*S-1-5-32-544:(F)" | Out-Null }
+    try {
+        Register-MonitorTask -Name $Monitor.TaskName -Path $NewTaskPath -ScriptPath $script
+        Start-ScheduledTask -TaskName $Monitor.TaskName -TaskPath $NewTaskPath -ErrorAction SilentlyContinue
+        Write-Log -Level CREATED -Message "Moved '$($Monitor.Name)' to '$dest', now running from '$NewTaskPath$($Monitor.TaskName)'."
+        return $true
+    }
+    catch {
+        Write-Log -Level FAILED -Message "Moved '$($Monitor.Name)' to '$dest' but could not register its task. Re-run the installer and give it the same name. $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Invoke-RootMove {
+    # Offers to move every monitor out of the old location. Returns how many moved.
+    param([object[]]$Monitors, [string]$NewRoot = $InstallRoot, [string]$OldRoot = $PreviousRoot)
+    $list = @($Monitors)
+    if (@($list).Count -eq 0) { return 0 }
+    Write-Host ""
+    Write-Host "Found in the old location $OldRoot"
+    foreach ($m in $list) { Write-Host ("  {0}  {1}" -f $m.Name, $(if ($m.Url) { $m.Url } else { 'URL not recorded' })) }
+    if (-not $NonInteractive) {
+        Write-Question -Question "Move to $NewRoot?" -Hint @(
+            "Each one keeps its history and its settings and starts again from the new folder.",
+            "N leaves them running where they are."
+        )
+        if ((Read-Choice -Prompt "Move" -Allowed @('Y','N') -Default 'Y') -ne 'Y') {
+            Write-Log -Level INFORMATIONAL -Message "Left $(@($list).Count) monitor(s) in '$OldRoot'."
+            return 0
+        }
+    }
+    $moved = 0
+    foreach ($m in $list) { if (Move-MonitorToNewRoot -Monitor $m -NewRoot $NewRoot) { $moved++ } }
+    if ($moved) {
+        $telemetry = Get-ScheduledTask -TaskName $TelemetryTaskName -TaskPath $PreviousTaskPath -ErrorAction SilentlyContinue
+        if (-not $telemetry) { $telemetry = Get-ScheduledTask -TaskName $TelemetryTaskName -TaskPath $TaskPath -ErrorAction SilentlyContinue }
+        if ($telemetry) { Write-Log -Level WARNING -Message "The telemetry publisher still reads '$OldRoot'. Re-run Install-TelemetryPublisher.ps1 so it reads '$NewRoot'." }
+    }
+    if ((Test-Path -LiteralPath $OldRoot) -and @(Get-ChildItem -LiteralPath $OldRoot -Force -ErrorAction SilentlyContinue).Count -eq 0) {
+        try { Remove-Item -LiteralPath $OldRoot -Force -ErrorAction Stop } catch { }
+    }
+    return $moved
+}
+
 function Get-FolderSizeText {
     # Human-sized total of a folder, for the removal listing
     param([string]$Path)
@@ -1521,7 +1665,9 @@ function Get-RemovableMonitor {
         [string]$Prefix = $TaskNamePrefix,
         [string]$LegacyDir = $LegacyInstallDir,
         [string]$LegacyTask = $LegacyTaskName,
-        [string]$LegacyName = $LegacyMonitorName
+        [string]$LegacyName = $LegacyMonitorName,
+        [string]$PrevRoot = $PreviousRoot,
+        [string]$PrevPath = $PreviousTaskPath
     )
     $items = New-Object System.Collections.ArrayList
     $seen = @()
@@ -1555,7 +1701,13 @@ function Get-RemovableMonitor {
             TaskName = $task.TaskName; TaskPath = $Path; TaskState = "$($task.State)"
         })
     }
-    $legacy = Get-LegacyInstall -Dir $LegacyDir -TaskName $LegacyTask -Path $Path
+    foreach ($m in @(Get-PreviousRootMonitor -Root $PrevRoot -Path $PrevPath -Prefix $Prefix -NewRoot $Root)) {
+        [void]$items.Add([PSCustomObject]@{
+            Name = "$($m.Name) (old location)"; Slug = $m.Slug; Dir = $m.Dir; Url = $m.Url; Kind = 'OldLocation'
+            TaskName = $m.TaskName; TaskPath = $m.TaskPath; TaskState = $(if ($m.HasTask) { "$((Get-ScheduledTask -TaskName $m.TaskName -TaskPath $m.TaskPath -ErrorAction SilentlyContinue).State)" } else { 'no task' })
+        })
+    }
+    $legacy = Get-LegacyInstall -Dir $LegacyDir -TaskName $LegacyTask -Path $PrevPath
     if ($legacy) {
         $lt = Get-ScheduledTask -TaskName $LegacyTask -TaskPath $Path -ErrorAction SilentlyContinue
         [void]$items.Add([PSCustomObject]@{
@@ -1572,10 +1724,9 @@ function Show-RemovableMonitor {
     $i = 0
     foreach ($m in @($Items)) {
         $i++
-        Write-Host ("  {0}. {1}" -f $i, $m.Name)
-        Write-Host ("     URL    : {0}" -f $(if ($m.Url) { $m.Url } else { 'not recorded' }))
-        Write-Host ("     Task   : {0}{1} ({2})" -f $m.TaskPath, $m.TaskName, $m.TaskState)
-        Write-Host ("     Folder : {0} ({1})" -f $m.Dir, (Get-FolderSizeText $m.Dir))
+        Write-Host ("  {0}  {1}" -f $i, $m.Name)
+        Write-Host ("     {0}" -f $(if ($m.Url) { $m.Url } else { 'URL not recorded' })) -ForegroundColor DarkGray
+        Write-Host ("     task {0}, {1} in {2}" -f $m.TaskState, (Get-FolderSizeText $m.Dir), $m.Dir) -ForegroundColor DarkGray
     }
 }
 
@@ -1704,9 +1855,11 @@ function Invoke-UninstallFlow {
         [bool]$KeepHistory = $KeepHistoryOnUninstall,
         [string]$Root = $InstallRoot,
         [string]$Path = $TaskPath,
-        [string]$KeepRoot = $HistoryKeepRoot
+        [string]$KeepRoot = $HistoryKeepRoot,
+        [string]$PrevRoot = $PreviousRoot,
+        [string]$PrevPath = $PreviousTaskPath
     )
-    $items = @(Get-RemovableMonitor -Root $Root -Path $Path)
+    $items = @(Get-RemovableMonitor -Root $Root -Path $Path -PrevRoot $PrevRoot -PrevPath $PrevPath)
     if (@($items).Count -eq 0) {
         Write-Log -Level FOUND -Message "No monitor is installed under '$Root' and no monitor task exists under '$Path'. Nothing to remove."
         return 0
@@ -1730,7 +1883,8 @@ function Invoke-UninstallFlow {
     else {
         $default = if (@($items).Count -eq 1) { '1' } else { '' }
         while (-not $target) {
-            $typed = "$(Read-Setting -Prompt "Remove which monitor? Type its number or its name, X to cancel" -Default $default)".Trim()
+            Write-Question -Question "Which one?" -Hint "Its number or its name. X cancels."
+            $typed = "$(Read-Setting -Prompt "Remove" -Default $default)".Trim()
             if (-not $typed) { Write-Log -Level WARNING -Message "Type a number, a name, or X to cancel."; continue }
             if ($typed -eq 'X' -or $typed -eq 'x') { Write-Log -Level FOUND -Message "Cancelled. Nothing was removed."; return 0 }
             $n = 0
@@ -1745,33 +1899,37 @@ function Invoke-UninstallFlow {
     $others = @($items | Where-Object { $_.Name -cne $target.Name })
     Write-Host ""
     Write-Host "About to remove"
-    Write-Host "  Monitor         : $($target.Name)"
-    Write-Host "  Task            : $($target.TaskPath)$($target.TaskName) ($($target.TaskState))"
-    Write-Host "  Folder          : $($target.Dir) ($(Get-FolderSizeText $target.Dir))"
-    Write-Host "  Left alone      : $(if (@($others).Count) { (@($others) | ForEach-Object { $_.Name }) -join ', ' } else { 'nothing else is installed' })"
-    Write-Host ""
+    Write-Host "  Monitor     : $($target.Name)"
+    Write-Host "  Task        : $($target.TaskPath)$($target.TaskName) ($($target.TaskState))"
+    Write-Host "  Folder      : $($target.Dir) ($(Get-FolderSizeText $target.Dir))"
+    Write-Host "  Left alone  : $(if (@($others).Count) { (@($others) | ForEach-Object { $_.Name }) -join ', ' } else { 'nothing else is installed' })"
     if (-not $NonInteractive) {
-        if ((Read-Choice -Prompt "Remove it? Y = remove, N = cancel" -Allowed @('Y','N') -Default 'N') -ne 'Y') {
+        Write-Question -Question "Remove it?"
+        if ((Read-Choice -Prompt "Remove" -Allowed @('Y','N') -Default 'N') -ne 'Y') {
             Write-Log -Level FOUND -Message "Cancelled. Nothing was removed."
             return 0
         }
-        $KeepHistory = (Read-Choice -Prompt "Keep the measurement history? Y = move the latency CSVs, outages, and drops log aside, N = delete them with the folder" -Allowed @('Y','N') -Default 'Y') -eq 'Y'
-        if (-not $KeepHistory) { Write-Log -Level WARNING -Message "The history is deleted with the folder. That cannot be undone." }
+        Write-Question -Question "Keep what it measured?" -Hint @(
+            "Y moves the latency CSVs, the outages CSV, and the drops log to $KeepRoot.",
+            "N deletes them with the folder, and that cannot be undone."
+        )
+        $KeepHistory = (Read-Choice -Prompt "Keep" -Allowed @('Y','N') -Default 'Y') -eq 'Y'
+        if (-not $KeepHistory) { Write-Log -Level WARNING -Message "The history goes with the folder. That cannot be undone." }
     }
     $result = Remove-MonitorInstall -Monitor $target -KeepHistory $KeepHistory -KeepRoot $KeepRoot
-    $left = @(Get-RemovableMonitor -Root $Root -Path $Path)
+    $left = @(Get-RemovableMonitor -Root $Root -Path $Path -PrevRoot $PrevRoot -PrevPath $PrevPath)
     if (@($left).Count -eq 0 -and (Test-Path -LiteralPath $Root)) {
         if (@(Get-ChildItem -LiteralPath $Root -Force -ErrorAction SilentlyContinue).Count -eq 0) {
             try { Remove-Item -LiteralPath $Root -Force -ErrorAction Stop; Write-Log -Level INFORMATIONAL -Message "Removed the empty install root '$Root'." } catch { }
         }
     }
     Write-Host ""
-    Write-Host "Removal summary"
-    Write-Host "  Monitor         : $($target.Name)"
-    Write-Host "  Task            : $($target.TaskPath)$($target.TaskName) ($(if ($result.TaskRemoved) { 'removed' } else { 'still there' }))"
-    Write-Host "  Folder          : $($target.Dir) ($(if ($result.FolderRemoved) { 'deleted' } else { 'still there' }))"
-    Write-Host "  History         : $(if ($result.HistoryPath) { "kept in $($result.HistoryPath)" } elseif ($KeepHistory) { 'none to keep' } else { 'deleted with the folder' })"
-    Write-Host "  Still installed : $(if (@($left).Count) { (@($left) | ForEach-Object { $_.Name }) -join ', ' } else { 'nothing' })"
+    Write-Host "Removed"
+    Write-Host "  Monitor     : $($target.Name)"
+    Write-Host "  Task        : $($target.TaskPath)$($target.TaskName) ($(if ($result.TaskRemoved) { 'removed' } else { 'still there' }))"
+    Write-Host "  Folder      : $($target.Dir) ($(if ($result.FolderRemoved) { 'deleted' } else { 'still there' }))"
+    Write-Host "  History     : $(if ($result.HistoryPath) { "kept in $($result.HistoryPath)" } elseif ($KeepHistory) { 'none to keep' } else { 'deleted with the folder' })"
+    Write-Host "  Left here   : $(if (@($left).Count) { (@($left) | ForEach-Object { $_.Name }) -join ', ' } else { 'nothing' })"
     Write-Host ""
     if (@($left).Count -eq 0) {
         $telemetry = Get-ScheduledTask -TaskName $TelemetryTaskName -TaskPath $Path -ErrorAction SilentlyContinue
@@ -1840,7 +1998,7 @@ function New-MonitorContent {
 function Test-EndpointReachable {
     # One-shot reachability check used at install time. Follows redirects exactly as the monitor does.
     $format = 'CODE=%{http_code}\nREDIRECTS=%{num_redirects}\nFINAL=%{url_effective}'
-    $lines = @(& curl.exe -s -L --max-redirs $MaxRedirects -o NUL -A "CurlMonitor/1.0 (DIT)" -H "Cache-Control: no-cache" -w $format --max-time $TimeoutSeconds $Url 2>$null)
+    $lines = @(& curl.exe -s -L --max-redirs $MaxRedirects -o NUL -A "CurlMonitor/1.0" -H "Cache-Control: no-cache" -w $format --max-time $TimeoutSeconds $Url 2>$null)
     $code = $null; $redirects = $null; $final = $null
     foreach ($line in $lines) {
         if ($line -match '^CODE=(\d{3})$') { $code = $Matches[1] }
@@ -2155,7 +2313,7 @@ function Get-ProbeResult {
     $lines = @()
     $exit = -1
     try {
-        $lines = @(& curl.exe -s -L --max-redirs $MaxRedirects -A "CurlMonitor/1.0 (DIT)" -H "Cache-Control: no-cache" -o $tempBody -w $format --max-time $TimeoutSeconds --max-filesize $MaxBodyBytes $Url 2>$null)
+        $lines = @(& curl.exe -s -L --max-redirs $MaxRedirects -A "CurlMonitor/1.0" -H "Cache-Control: no-cache" -o $tempBody -w $format --max-time $TimeoutSeconds --max-filesize $MaxBodyBytes $Url 2>$null)
         $exit = $LASTEXITCODE
     }
     catch {
@@ -2969,7 +3127,8 @@ if ("$Action" -ne 'Install' -and "$Action" -ne 'Uninstall') {
     exit 1
 }
 if (-not $NonInteractive) {
-    $Action = if ((Read-Choice -Prompt "Install or upgrade a monitor, or remove one? I = install or upgrade, U = uninstall" -Allowed @('I','U') -Default 'I') -eq 'U') { 'Uninstall' } else { 'Install' }
+    Write-Question -Question "Install or uninstall?" -Hint @("I  install a monitor, or upgrade one already here", "U  remove a monitor from this server")
+    $Action = if ((Read-Choice -Prompt "Choose" -Allowed @('I','U') -Default 'I') -eq 'U') { 'Uninstall' } else { 'Install' }
 }
 if ("$Action" -eq 'Uninstall') { exit (Invoke-UninstallFlow) }
 
@@ -2984,14 +3143,19 @@ if (-not (Test-Path $InstallRoot)) {
     }
 }
 
-# An older HST-only install is offered a migration before anything else, so its settings prefill the prompts
+# Monitors from the old location move first, so the rest of this run sees them where everything else looks
+$null = Invoke-RootMove -Monitors (Get-PreviousRootMonitor)
+
+# An older HST-only install is offered a migration before the prompts, so its settings prefill them
 $existingMonitors = @(Get-InstalledMonitor)
 $legacy = Get-LegacyInstall
 $migrate = $false
 if ($legacy) {
-    Write-Log -Level FOUND -Message "Found an older install at '$($legacy.Dir)'$(if ($legacy.HasTask) { " with task '$($legacy.TaskPath)$($legacy.TaskName)'" } else { '' })."
-    Write-Log -Level INFORMATIONAL -Message "Migrating stops and removes that task, copies its settings, latency history, outages, and drops log into the new layout, then deletes the old folder. One monitor keeps running, so no duplicate alerts. It happens at the end, once this run has everything it needs."
-    $migrate = if ($NonInteractive) { $true } else { (Read-Choice -Prompt "Migrate it now? Y = migrate, N = leave it where it is" -Allowed @('Y','N') -Default 'Y') -eq 'Y' }
+    Write-Question -Question "Move the older install at $($legacy.Dir) into $InstallRoot?" -Hint @(
+        "Its settings and history come across, then its task and folder go. Nothing is removed until this run is finished.",
+        "N leaves it running where it is."
+    )
+    $migrate = if ($NonInteractive) { $true } else { (Read-Choice -Prompt "Move" -Allowed @('Y','N') -Default 'Y') -eq 'Y' }
 }
 
 $MonitorName = Get-MonitorName -SavedDefault $(if ($migrate) { $LegacyMonitorName } else { "" }) -Existing $existingMonitors
@@ -3013,7 +3177,6 @@ if (-not (Test-Path $InstallDir)) {
     }
 }
 try {
-    Protect-InstallFolder -Path (Split-Path -Path $InstallRoot -Parent) -OwnerOnly
     Protect-InstallFolder -Path $InstallRoot
     Protect-InstallFolder -Path $InstallDir
     Protect-StoredSecret -Root $InstallRoot
@@ -3165,14 +3328,7 @@ if ($migrate) {
 }
 
 try {
-    $action    = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$monitorPath`""
-    $trigger   = New-ScheduledTaskTrigger -AtStartup
-    $settingsSet = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -RestartCount $RestartCount -RestartInterval (New-TimeSpan -Minutes $RestartMinutes) -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -DontStopOnIdleEnd
-    $principal = New-ScheduledTaskPrincipal -UserId $RunAsUser -LogonType ServiceAccount -RunLevel Highest
-    Register-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -Action $action -Trigger $trigger -Settings $settingsSet -Principal $principal -Force -ErrorAction Stop | Out-Null
-    # CIM cmdlets can report failure without throwing, so confirm the task actually exists before claiming success
-    $registered = Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction Stop
-    if (-not $registered) { throw "The task was not found after registration." }
+    Register-MonitorTask -Name $TaskName -Path $TaskPath -ScriptPath $monitorPath
     Write-Log -Level CREATED -Message "Registered scheduled task '$TaskPath$TaskName' running as $RunAsUser at startup."
 }
 catch {
@@ -3236,8 +3392,7 @@ Write-Host "  Site            : $site"
 Write-Host "  URL             : $Url"
 Write-Host "  Healthy poll    : HTTP 200, at least $MinPopulatedBytes bytes$(if ($ExpectedContentMarker) { ", containing '$ExpectedContentMarker'" } else { '' })"
 Write-Host "  Task            : $TaskPath$TaskName ($taskState, runs as $RunAsUser at startup)"
-Write-Host "  Monitor         : $monitorPath"
-Write-Host "  Data folder     : $InstallDir  (Latency_yyyyMM.csv, Outages.csv, Drops.log, daily transcripts)"
+Write-Host "  Folder          : $InstallDir  (the monitor, its settings, and its history)"
 if ($AlertsEnabled) {
     Write-Host "  Alerts          : $($mail.MailMethod) from $($mail.MailFrom) to $($mail.MailTo -join ', ')"
     Write-Host "  Down alert      : after $DownThreshold failed polls in a row"

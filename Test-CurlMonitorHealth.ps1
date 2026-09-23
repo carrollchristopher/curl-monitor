@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     Run from an elevated Windows PowerShell console on a server where Install-CurlMonitor.ps1 was run. Every
-    monitor under C:\ProgramData\DIT\CurlMonitor is checked, one section each, with a single verdict at the end.
+    monitor under C:\ProgramData\CurlMonitor is checked, one section each, with a single verdict at the end.
     Use -Monitor to check just one.
     By default it changes nothing. It checks the scheduled task and the monitor process, the heartbeat, the polls
     recorded in the last hour and the last 24 hours, problems in the monitor's own logs, the stored mail secret,
@@ -28,7 +28,7 @@
     Check only the monitor with this name. Required with -OutageDrill when the server runs more than one.
 
 .PARAMETER InstallRoot
-    Where the installer keeps its monitors. Default C:\ProgramData\DIT\CurlMonitor.
+    Where the installer keeps its monitors. Default C:\ProgramData\CurlMonitor.
 
 .PARAMETER DrillCleanupMinutes
     Minutes after which a one-time scheduled task removes the drill file if the drill was interrupted. Default 10.
@@ -48,9 +48,10 @@
 param(
     [switch]$OutageDrill,
     [string]$Monitor = '',
-    [string]$InstallRoot = 'C:\ProgramData\DIT\CurlMonitor',
+    [string]$InstallRoot = 'C:\ProgramData\CurlMonitor',
     [string]$InstallDir = '',
-    [string]$TaskPath = '\DIT\',
+    [string]$TaskPath = '\CurlMonitor\',
+    [string]$PreviousRoot = 'C:\ProgramData\DIT\CurlMonitor',
     [string]$TaskName = '',
     [int]$DrillCleanupMinutes = 10
 )
@@ -185,7 +186,7 @@ function Invoke-EndpointProbe {
     param([Parameter(Mandatory)][hashtable]$Config)
     $body = Join-Path $env:TEMP ("hst-health-probe-{0}.tmp" -f $PID)
     $format = 'CODE=%{http_code}\nTOTAL=%{time_total}\nREDIRECTS=%{num_redirects}\nSIZE=%{size_download}\nIP=%{remote_ip}'
-    $lines = @(& curl.exe -q -s -L --max-redirs ([int]$Config.MaxRedirects) -A "CSP-HST-Latency-Probe/1.0 (DIT)" -H "Cache-Control: no-cache" -o $body -w $format --max-time ([int]$Config.TimeoutSeconds) $Config.Url 2>$null)
+    $lines = @(& curl.exe -q -s -L --max-redirs ([int]$Config.MaxRedirects) -A "CurlMonitor-Health/1.0" -H "Cache-Control: no-cache" -o $body -w $format --max-time ([int]$Config.TimeoutSeconds) $Config.Url 2>$null)
     $exit = $LASTEXITCODE
     $parsed = @{}
     foreach ($l in $lines) { if ("$l" -match '^([A-Z]+)=(.*)$') { $parsed[$Matches[1]] = $Matches[2] } }
@@ -331,7 +332,7 @@ function Test-MailHost {
 }
 
 function Invoke-OutageDrill {
-    param([Parameter(Mandatory)][hashtable]$Config, [Parameter(Mandatory)][string]$DropLogPath, $Process, [string]$TaskPath = '\DIT\', [int]$CleanupMinutes = 10)
+    param([Parameter(Mandatory)][hashtable]$Config, [Parameter(Mandatory)][string]$DropLogPath, $Process, [string]$TaskPath = '\CurlMonitor\', [int]$CleanupMinutes = 10)
     $cycle = [int]$Config.IntervalSeconds + [int]$Config.TimeoutSeconds
     $firstFailBudget = $cycle * 2 + 20
     $downBudget = $cycle * ([int]$Config.DownThreshold + 1) + 60
@@ -686,7 +687,14 @@ else {
     }
 }
 if (-not $folders.Count) {
-    Write-Check FAIL "No monitor found under '$InstallRoot'. Run Install-CurlMonitor.ps1 on this server first."
+    # A server set up before the parent folder was dropped still has its monitors one level deeper
+    $older = @(Get-MonitorFolder -Root $PreviousRoot)
+    if ($older.Count) {
+        Write-Check FAIL "No monitor under '$InstallRoot', but $($older.Count) is installed in the old location '$PreviousRoot': $((@($older | ForEach-Object { $_.Name })) -join ', '). Run Install-CurlMonitor.ps1 and let it move them, or check that one with -InstallDir."
+    }
+    else {
+        Write-Check FAIL "No monitor found under '$InstallRoot'. Run Install-CurlMonitor.ps1 on this server first."
+    }
     exit 1
 }
 if ($OutageDrill -and $folders.Count -gt 1) {

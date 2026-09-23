@@ -19,17 +19,19 @@ Alert subjects read `[DOWN] HST eChart at Capital City (SERVER01) - unreachable`
 
 ## Install
 
-Run `Install-CurlMonitor.ps1` from an elevated Windows PowerShell 5.1 console on the site server. It asks for:
+Run `Install-CurlMonitor.ps1` from an elevated Windows PowerShell 5.1 console on the site server. It asks whether you are installing or uninstalling, then:
 
 1. **Monitor name**, for example `HST eChart`. It names the folder, the scheduled task, and every alert.
 2. **URL** to watch, http or https.
 3. **Site name**, which appears in every alert subject beside the monitor name.
-4. **Text that must appear on the page**, or blank to check only the status code and the page size.
+4. **Text the page must contain**, so a page that loads but comes back wrong still counts as down. Blank accepts any page that returns HTTP 200.
 5. **Mail settings**, through the wizard.
 
 The installer then writes the monitor, registers the task, sends a test email, and sends an install confirmation. Poll interval, timeouts, and alert thresholds are not prompted: edit the config block at the top of the installer before deploying.
 
 Re-running upgrades a monitor in place, with every prompt prefilled from its last run, so pressing Enter through the whole run is enough. The monitor name prefills with the one installed most recently, so on a server running several monitors, type the name of the one you are upgrading. Type a different name to add a second monitor beside it. An older HST-only install under `C:\ProgramData\DIT\HSTProbe` is offered a migration on the first run: its settings and history move into the new layout, and its task and folder are removed.
+
+Monitors installed before the parent folder was dropped live under `C:\ProgramData\DIT\CurlMonitor` with their tasks in `\DIT\`. The installer finds them and offers to move them: each keeps its settings and history and starts again from the new folder, and nothing else in the run changes. Where the telemetry publisher runs, re-run `Install-TelemetryPublisher.ps1` afterwards so it reads the new root.
 
 The first site in a tenant can create the Graph app registration, the shared sender mailbox, and the Exchange send scope during the install. It prints the tenant ID, client ID, and client secret once. Later sites paste those three values.
 
@@ -53,7 +55,7 @@ Requirements: Windows Server or Windows 10/11 with Windows PowerShell 5.1, curl.
 
 The installer's first question is whether to install or remove. Answering U lists every monitor on the server with its URL, task, and data size, and removes the one you pick: its task, its folder, its stored credential, and its generated script. Other monitors are untouched.
 
-It asks separately about the measurement history, defaulting to keeping it. Kept history moves to `C:\ProgramData\DIT\CurlMonitor-history` under a dated folder named in the run. Deleting it is permanent.
+It asks separately about the measurement history, defaulting to keeping it. Kept history moves to `C:\ProgramData\CurlMonitor-history` under a dated folder named in the run. Deleting it is permanent.
 
 An older `HSTProbe` install and anything a part-finished removal left behind are listed for removal too. When the last monitor goes and the telemetry publisher is still scheduled, the run names the command to remove that task rather than removing it silently.
 
@@ -112,11 +114,11 @@ Install a monitor with `$AlertsEnabled = $false` in the config block for a telem
 wizard, no alerts, no stored credential, and every poll, outage and slow period still recorded.
 
 <!-- telemetry:start -->
-Last 24 hours, measured to 2026-09-23 17:15 local.
+Last 24 hours, measured to 2026-09-23 07:15 local.
 
 | Endpoint | Polls | Available | p50 | p95 | Outages |
 |---|---:|---:|---:|---:|---:|
-| ENDPOINT-01 | 7703 | 99.85% | 209 ms | 539 ms | 2 |
+| ENDPOINT-01 | 9411 | 99.99% | 257 ms | 586 ms | 0 |
 <!-- telemetry:end -->
 
 ## Testing
@@ -129,7 +131,7 @@ Invoke-ScriptAnalyzer -Path .\Install-CurlMonitor.ps1 -Settings .\PSScriptAnalyz
 
 ## Data written on the server
 
-Each monitor keeps its own folder under `C:\ProgramData\DIT\CurlMonitor`, named after the monitor, locked to SYSTEM and Administrators with read access for Users:
+Each monitor keeps its own folder under `C:\ProgramData\CurlMonitor`, named after the monitor, locked to SYSTEM and Administrators with read access for Users:
 
 - `Watch-CurlMonitor.ps1`, the generated monitor
 - `install-settings.json` and `credential.bin` (DPAPI, machine scope)
@@ -137,4 +139,4 @@ Each monitor keeps its own folder under `C:\ProgramData\DIT\CurlMonitor`, named 
 - `Transcript_yyyyMMdd.log` daily transcripts, pruned after 30 days
 - `heartbeat.json` and `summary-sent.txt`
 
-The scheduled tasks live under `\DIT\`, named `Curl Monitor - <monitor name>`.
+The scheduled tasks live under `\CurlMonitor\`, named `Curl Monitor - <monitor name>`.

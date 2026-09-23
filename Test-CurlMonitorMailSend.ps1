@@ -38,7 +38,7 @@ $ClientSecret   = ""                       # Plaintext secret for ad hoc use. Le
 $MailFrom       = ""
 $MailTo         = ""
 
-$InstallDir          = "C:\ProgramData\DIT\CurlMonitor"
+$InstallDir          = "C:\ProgramData\CurlMonitor"
 $SettingsFileName    = "install-settings.json"
 $CredentialFileName  = "credential.bin"
 

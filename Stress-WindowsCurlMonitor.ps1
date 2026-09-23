@@ -14,7 +14,7 @@ $firstFunc = ($ast.EndBlock.Statements | Where-Object { $_ -is [System.Managemen
 $assigns = $ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and $_.Extent.StartLineNumber -lt $firstFunc }
 foreach ($a in $assigns) { if ($a.Left.Extent.Text -ne '$Template_MonitorScript') { Invoke-Expression $a.Extent.Text } }
 $Template_MonitorScript = $template
-foreach ($f in $ast.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst]},$false) | Where-Object { $_.Name -in @('Write-Log','ConvertTo-SafeSiteName','ConvertTo-SecureText','Protect-Secret','Save-SmtpCredential','Remove-SmtpCredential','New-MonitorContent','ConvertTo-MonitorSlug','Get-InstalledMonitor','Get-LegacyInstall','Get-FolderSizeText','Get-RemovableMonitor','Show-RemovableMonitor','Select-RemovableMonitor','Stop-MonitorProcess','Move-MonitorHistory','Remove-MonitorInstall','Invoke-UninstallFlow') }) { Invoke-Expression $f.Extent.Text }
+foreach ($f in $ast.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst]},$false) | Where-Object { $_.Name -in @('Write-Log','ConvertTo-SafeSiteName','ConvertTo-SecureText','Protect-Secret','Save-SmtpCredential','Remove-SmtpCredential','New-MonitorContent','ConvertTo-MonitorSlug','Get-InstalledMonitor','Get-LegacyInstall','Get-FolderSizeText','Get-RemovableMonitor','Show-RemovableMonitor','Select-RemovableMonitor','Stop-MonitorProcess','Move-MonitorHistory','Remove-MonitorInstall','Invoke-UninstallFlow','Get-PreviousRootMonitor') }) { Invoke-Expression $f.Extent.Text }
 function Write-Log { param($Level,$Message) $script:LastLog = "$Level|$Message" }
 
 $scratch = 'C:\tmp\hst_win_tests'
@@ -84,7 +84,7 @@ Check "K1 Remove-SmtpCredential deletes the file" (-not (Test-Path $credPath))
 Section "L. Scheduled task objects built with the installer's exact parameters"
 Import-Module ScheduledTasks
 $RestartCount = 3; $RestartMinutes = 1; $RunAsUser = 'SYSTEM'
-$monitorPath = 'C:\ProgramData\DIT\CurlMonitor\Watch-CurlMonitor.ps1'
+$monitorPath = 'C:\ProgramData\CurlMonitor\Watch-CurlMonitor.ps1'
 $taskOk = $true
 try {
     $action    = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$monitorPath`""
@@ -480,7 +480,7 @@ $keeperBefore = if ($keeperCsv) { @(Import-Csv $keeperCsv.FullName).Count } else
 $doomedPolling = $null -ne (Get-ChildItem (Join-Path $runDirU 'Doomed') -Filter 'Latency_*.csv' -ErrorAction SilentlyContinue)
 $uKeepRoot = Join-Path $scratch 'kept'
 $NonInteractive = $true
-$rcU = Invoke-UninstallFlow -Requested 'Doomed' -KeepHistory $true -Root $runDirU -Path $uTaskPath -KeepRoot $uKeepRoot
+$rcU = Invoke-UninstallFlow -Requested 'Doomed' -KeepHistory $true -Root $runDirU -Path $uTaskPath -KeepRoot $uKeepRoot -PrevRoot (Join-Path $runDirU 'no-old-location') -PrevPath $uTaskPath
 $NonInteractive = $false
 Start-Sleep -Seconds 12
 $keeperAfter = if ($keeperCsv) { @(Import-Csv $keeperCsv.FullName).Count } else { 0 }

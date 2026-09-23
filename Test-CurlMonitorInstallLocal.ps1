@@ -44,9 +44,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$InstallDir = 'C:\ProgramData\DIT\CurlMonitor'
+$InstallDir = 'C:\ProgramData\CurlMonitor'
 $TaskName = 'HST eChart Monitor'
-$TaskPath = '\DIT\'
+$TaskPath = '\CurlMonitor\'
 $script:pass = 0; $script:fail = 0; $script:failed = @()
 $R = [ordered]@{ Started = (Get-Date).ToString('o'); Checks = @() }
 

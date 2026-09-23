@@ -15,10 +15,10 @@
     Working copy to publish into.
 
 .PARAMETER MonitorRoot
-    Root holding one folder per monitor. Default C:\ProgramData\DIT\CurlMonitor.
+    Root holding one folder per monitor. Default C:\ProgramData\CurlMonitor.
 
 .PARAMETER StatePath
-    Folder holding publish-state.json and endpoint-map.json. Never published. Default C:\ProgramData\DIT\Telemetry.
+    Folder holding publish-state.json and endpoint-map.json. Never published. Default C:\ProgramData\CurlMonitor-telemetry.
 
 .PARAMETER Window
     Morning, Evening, or Auto. Auto picks Morning before noon.
@@ -27,7 +27,7 @@
     Computes the window and writes the files, then stops without touching git.
 
 .EXAMPLE
-    .\Publish-UptimeTelemetry.ps1 -RepoPath C:\ProgramData\DIT\Telemetry\curl-monitor
+    .\Publish-UptimeTelemetry.ps1 -RepoPath C:\ProgramData\CurlMonitor-telemetry\curl-monitor
 
 .NOTES
     Author:      Christopher Carroll
@@ -36,9 +36,9 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$RepoPath = 'C:\ProgramData\DIT\Telemetry\curl-monitor',
-    [string]$MonitorRoot = 'C:\ProgramData\DIT\CurlMonitor',
-    [string]$StatePath = 'C:\ProgramData\DIT\Telemetry',
+    [string]$RepoPath = 'C:\ProgramData\CurlMonitor-telemetry\curl-monitor',
+    [string]$MonitorRoot = 'C:\ProgramData\CurlMonitor',
+    [string]$StatePath = 'C:\ProgramData\CurlMonitor-telemetry',
     [ValidateSet('Morning', 'Evening', 'Auto')][string]$Window = 'Auto',
     [switch]$DryRun,
     [string]$LogPath = ''

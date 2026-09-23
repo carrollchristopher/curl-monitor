@@ -86,7 +86,7 @@ Check "Non-interactive Graph refused (secret needs console)" ($src -match "Graph
 Check "Probe follows redirects with a bounded hop count" ($template -match '-L --max-redirs \$MaxRedirects' -and $src -match '(?m)^\$MaxRedirects\s+=\s+5')
 Check "Install-time preflight follows redirects too" ($src -match 'function Test-EndpointReachable[\s\S]*?-L --max-redirs \$MaxRedirects')
 Check "URL, monitor name, and content marker are prompted, not hardcoded" ($src -match '(?m)^\$Url\s+=\s+""\s' -and $src -match '(?m)^\$MonitorName\s+=\s+""\s' -and $src -match '(?m)^\$ExpectedContentMarker\s+=\s+""\s' -and $src -match 'function Get-MonitorUrl' -and $src -match 'function Get-MonitorName' -and $src -match 'function Get-ContentMarker')
-Check "Task cmdlets stop on error and registration is verified" ($src -match 'Register-ScheduledTask[^\n]*-ErrorAction Stop' -and $src -match 'Get-ScheduledTask -TaskName \$TaskName -TaskPath \$TaskPath -ErrorAction Stop' -and $src -match 'Start-ScheduledTask -TaskName \$TaskName -TaskPath \$TaskPath -ErrorAction Stop')
+Check "Task cmdlets stop on error and registration is verified" ($src -match 'Register-ScheduledTask[^\n]*-ErrorAction Stop' -and $src -match 'function Register-MonitorTask[\s\S]*?Get-ScheduledTask -TaskName \$Name -TaskPath \$Path -ErrorAction Stop' -and $src -match 'Start-ScheduledTask -TaskName \$TaskName -TaskPath \$TaskPath -ErrorAction Stop')
 $installTail = $src.Substring($src.IndexOf('$MonitorName = Get-MonitorName'))
 Check "Existing task replaced in place, unregister only for the older install" ((-not ($installTail -match 'Unregister-ScheduledTask')) -and $src -match '(?s)function Invoke-LegacyMigration.*?Unregister-ScheduledTask' -and $src -match 'Register-ScheduledTask[^\n]*-Force')
 Check "Monitor staged as .new and swapped in after verification" ($src -match '\$stagedPath = "\$monitorPath\.new"' -and $src -match 'Move-Item -Path \$stagedPath -Destination \$monitorPath -Force -ErrorAction Stop')
@@ -111,7 +111,7 @@ $firstFunc = ($ast.EndBlock.Statements | Where-Object { $_ -is [System.Managemen
 $assigns = $ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and $_.Extent.StartLineNumber -lt $firstFunc }
 foreach ($a in $assigns) { if ($a.Left.Extent.Text -ne '$Template_MonitorScript') { Invoke-Expression $a.Extent.Text } }
 $Template_MonitorScript = $template
-foreach ($f in $ast.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst]},$false) | Where-Object { $_.Name -in @('Write-Log','ConvertTo-SafeSiteName','Test-EmailAddress','ConvertTo-RecipientList','ConvertTo-DerivedDirectSendHost','New-MonitorContent','Read-Setting','Read-Choice','Read-PortSetting','Test-GuidLike','Test-DateInput','ConvertTo-GraphMailBody','New-AlertBody') }) { Invoke-Expression $f.Extent.Text }
+foreach ($f in $ast.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst]},$false) | Where-Object { $_.Name -in @('Write-Log','ConvertTo-SafeSiteName','Test-EmailAddress','ConvertTo-RecipientList','ConvertTo-DerivedDirectSendHost','New-MonitorContent','Read-Setting','Read-Choice','Read-PortSetting','Write-Question','Test-GuidLike','Test-DateInput','ConvertTo-GraphMailBody','New-AlertBody') }) { Invoke-Expression $f.Extent.Text }
 function Write-Log { param($Level,$Message) }   # silence during tests
 
 function Gen($site,$mail){ New-MonitorContent -SiteName $site -Mail $mail }
@@ -961,7 +961,7 @@ Check "Web error bodies surfaced in installer and monitor" ((([regex]::Matches($
 Check "Access-denied hint explains the propagation wait" ($src -match 'Wait at least 30 minutes without retrying')
 Check "First-site Graph test send auto-waits only for an Exchange access denial" ($src -match "\`$method -eq 'Graph' -and \`$script:LastGraphSendError -eq 'AccessDenied' -and \(\`$created -or" -and $src -match 'wait and retry automatically')
 Check "Ports validated through Read-PortSetting" ($src -match 'function Read-PortSetting' -and -not ($src -match '\[int\]\(Read-Setting -Prompt "Port"'))
-Check "Install root and monitor folder hardened before anything is written" ($src -match 'function Protect-InstallFolder' -and $src -match "Protect-InstallFolder -Path \`$InstallDir\s*\r?\n" -and $src -match "Protect-InstallFolder -Path \`$InstallRoot\s*\r?\n" -and $src -match "Protect-InstallFolder -Path \(Split-Path -Path \`$InstallRoot -Parent\) -OwnerOnly")
+Check "Install root and monitor folder hardened before anything is written" ($src -match 'function Protect-InstallFolder' -and $src -match "Protect-InstallFolder -Path \`$InstallDir\s*\r?\n" -and $src -match "Protect-InstallFolder -Path \`$InstallRoot\s*\r?\n" -and -not ($src -match 'Protect-InstallFolder -Path \(Split-Path'))
 Check "Credential file restricted before content is written, icacls checked" ($src -match "(?s)function Save-SmtpCredential \{.*?icacls\.exe.*?LASTEXITCODE.*?Set-Content.*?\n\}")
 Check "Exchange not-found mapping is narrow and transient errors retried" ($src -match "couldn\.t be found\|could not be found" -and $src -match '429, 500, 502, 503, 504')
 Check "Stale role assignment replaced instead of trusted by name" ($src -match "Remove-ManagementRoleAssignment")
@@ -1314,9 +1314,9 @@ Set-Content (Join-Path $legacyDir 'HST-eChart-Monitor_20260915.log') -Value 'tra
 Set-Content (Join-Path $legacyDir 'smtp-credential.bin') -Value 'Y2lwaGVy' -Encoding ASCII
 Set-Content (Join-Path $legacyDir 'daily-summary-sent.txt') -Value '2026-09-15' -Encoding ASCII
 @{ Beat = '2026-09-15T10:00:00.0000000Z'; IsDown = $true; ConsecutiveFailures = 5; Stopped = $false } | ConvertTo-Json | Set-Content (Join-Path $legacyDir 'monitor-heartbeat.json') -Encoding UTF8
-$legacy = Get-LegacyInstall -Dir $legacyDir -TaskName 'No Such Curl Task' -Path '\DIT\'
+$legacy = Get-LegacyInstall -Dir $legacyDir -TaskName 'No Such Curl Task' -Path '\CurlMonitor\'
 Check "K7 the older install is found with its settings and URL" ($legacy -and -not $legacy.HasTask -and $legacy.Url -eq 'https://legacy.example.com/echart' -and $legacy.SiteName -eq 'CapCity')
-Check "K7 no older install means nothing to migrate" ($null -eq (Get-LegacyInstall -Dir (Join-Path $kRoot 'missing') -TaskName 'No Such Curl Task' -Path '\DIT\'))
+Check "K7 no older install means nothing to migrate" ($null -eq (Get-LegacyInstall -Dir (Join-Path $kRoot 'missing') -TaskName 'No Such Curl Task' -Path '\CurlMonitor\'))
 $newDir = Join-Path $kRoot 'HST-eChart-migrated'
 New-Item $newDir -ItemType Directory | Out-Null
 $migrated = Invoke-LegacyMigration -Legacy $legacy -Destination $newDir
@@ -1336,7 +1336,7 @@ Set-Content (Join-Path $legacyDir2 'HST-eChart-Drops.log') -Value 'x' -Encoding 
 $newDir2 = Join-Path $kRoot 'HST-eChart-blocked'
 New-Item $newDir2 -ItemType Directory | Out-Null
 $blocker = [System.IO.File]::Open((Join-Path $legacyDir2 'HST-eChart-Outages.csv'), [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::None)
-$legacy2 = Get-LegacyInstall -Dir $legacyDir2 -TaskName 'No Such Curl Task' -Path '\DIT\'
+$legacy2 = Get-LegacyInstall -Dir $legacyDir2 -TaskName 'No Such Curl Task' -Path '\CurlMonitor\'
 $migrated2 = Invoke-LegacyMigration -Legacy $legacy2 -Destination $newDir2
 $blocker.Close()
 Check "K9 a file that will not copy keeps the old folder and says so" (-not $migrated2 -and (Test-Path $legacyDir2) -and (($script:Logs -join "`n") -match "did not copy, so '.*old-HSTProbe2' is left in place"))
@@ -1348,11 +1348,11 @@ Set-Content (Join-Path $legacyDir3 'HST-eChart-Outages.csv') -Value 'old,short' 
 $newDir3 = Join-Path $kRoot 'HST-eChart-kept'
 New-Item $newDir3 -ItemType Directory | Out-Null
 Set-Content (Join-Path $newDir3 'Outages.csv') -Value 'newer history that must survive' -Encoding UTF8
-$legacy3 = Get-LegacyInstall -Dir $legacyDir3 -TaskName 'No Such Curl Task' -Path '\DIT\'
+$legacy3 = Get-LegacyInstall -Dir $legacyDir3 -TaskName 'No Such Curl Task' -Path '\CurlMonitor\'
 $migrated3 = Invoke-LegacyMigration -Legacy $legacy3 -Destination $newDir3
 Check "K9 history already in the new folder survives and the legacy copy lands beside it" ($migrated3 -and (Get-Content (Join-Path $newDir3 'Outages.csv')) -eq 'newer history that must survive' -and @(Get-ChildItem $newDir3 -Filter 'legacy-*Outages.csv').Count -eq 1)
 Remove-Item $kRoot -Recurse -Force -ErrorAction SilentlyContinue
-$InstallRoot = 'C:\ProgramData\DIT\CurlMonitor'
+$InstallRoot = 'C:\ProgramData\CurlMonitor'
 
 
 Section "L. Fixes from the stress campaign"
@@ -1393,13 +1393,13 @@ $NonInteractive = $false; $Url = ''
 
 Push @('')
 $m1 = Get-ContentMarker -SavedDefault 'Sign in'
-Check "L5 Enter keeps the saved text and the prompt says so" ($m1 -eq 'Sign in' -and $script:PromptLog[0] -eq "Required text (Enter = keep 'Sign in', - = no text check)")
+Check "L5 Enter keeps the saved text and the prompt offers the dash" ($m1 -eq 'Sign in' -and $script:PromptLog[0] -eq 'Text (- to drop)')
 Push @('-')
 $m2 = Get-ContentMarker -SavedDefault 'Sign in'
-Check "L5 a dash drops the text check on a re-run" ($m2 -eq '' -and (($script:Logs -join "`n") -match 'No text check'))
+Check "L5 a dash drops the text check on a re-run" ($m2 -eq '')
 Push @('')
 $m3 = Get-ContentMarker -SavedDefault ''
-Check "L5 with nothing saved the prompt still offers blank for none" ($m3 -eq '' -and $script:PromptLog[0] -eq 'Required text (blank for none)')
+Check "L5 with nothing saved the prompt is just the text" ($m3 -eq '' -and $script:PromptLog[0] -eq 'Text')
 
 $lMig = Join-Path $kRoot 'mig'
 $lLegacy = Join-Path $lMig 'legacy'; $lDest = Join-Path $lMig 'dest'
@@ -1611,8 +1611,11 @@ Remove-Item $tRoot -Recurse -Force -ErrorAction SilentlyContinue
 
 
 Section "U. Uninstall: listing, selection, removal, and the broken shapes"
-foreach ($f in $ast.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in @('Get-FolderSizeText','Get-RemovableMonitor','Show-RemovableMonitor','Select-RemovableMonitor','Stop-MonitorProcess','Move-MonitorHistory','Remove-MonitorInstall','Invoke-UninstallFlow')},$false)) { Invoke-Expression $f.Extent.Text }
+foreach ($f in $ast.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in @('Get-FolderSizeText','Get-RemovableMonitor','Show-RemovableMonitor','Select-RemovableMonitor','Stop-MonitorProcess','Move-MonitorHistory','Remove-MonitorInstall','Invoke-UninstallFlow','Get-PreviousRootMonitor','Move-MonitorToNewRoot','Invoke-RootMove','Register-MonitorTask','Protect-InstallFolder')},$false)) { Invoke-Expression $f.Extent.Text }
 $uRoot = Join-Path $InstallDir 'uninstall'
+# A real install in the old location on this machine must never leak into these listings
+$PreviousRoot = Join-Path $InstallDir 'no-old-location'
+$PreviousTaskPath = '\NoSuchTaskPath\'
 $uKeep = Join-Path $InstallDir 'uninstall-kept'
 $uTaskPath = '\NoSuchTaskPath\'
 $script:ULogs = @()
@@ -1657,7 +1660,7 @@ UAnswers @('Patient Portal', 'Y', 'N')
 $script:ULogs = @()
 $rcU = Invoke-UninstallFlow -Root $uRoot -Path $uTaskPath -KeepRoot $uKeep
 Check "U4 deleting the history says it cannot be undone and keeps nothing" ($rcU -eq 0 -and @(Get-ChildItem $uKeep -Directory).Count -eq 1 -and ($script:ULogs -join "`n") -match 'cannot be undone')
-Check "U4 the summary says what went and what is still installed" ((($script:UOut -join "`n") -match '(?s)Removal summary.*Folder\s+: .*deleted.*Still installed : half-removed'))
+Check "U4 the summary says what went and what is still installed" ((($script:UOut -join "`n") -match '(?s)Removed\s*\n\s+Monitor.*Folder\s+: .*deleted.*Left here   : half-removed'))
 
 UReset $uRoot
 $uLegacy = Join-Path $uRoot 'HSTProbe'
@@ -1704,13 +1707,78 @@ New-Item (Join-Path $uRoot 'safe') -ItemType Directory -Force | Out-Null
 Set-Content (Join-Path $uRoot 'safe\Drops.log') -Value 'x' -Encoding UTF8
 $uTrav = Move-MonitorHistory -Monitor $uTraversal -KeepRoot $uKeep
 Check "U8 a folder name that climbs out cannot write outside the keep root" ($uTrav -and $uTrav.StartsWith($uKeep, [StringComparison]::OrdinalIgnoreCase))
-Check "U9 the first question routes to the uninstall and exits before the install root is touched" ($src -match "Install or upgrade a monitor, or remove one\? I = install or upgrade, U = uninstall" -and $src -match "if \(""\`$Action"" -eq 'Uninstall'\) \{ exit \(Invoke-UninstallFlow\) \}" -and $src.IndexOf("exit (Invoke-UninstallFlow)") -lt $src.IndexOf("Created install root"))
+Check "U9 the first question routes to the uninstall and exits before the install root is touched" ($src -match 'Write-Question -Question "Install or uninstall\?" -Hint @\("I  install' -and $src -match "if \(""\`$Action"" -eq 'Uninstall'\) \{ exit \(Invoke-UninstallFlow\) \}" -and $src.IndexOf("exit (Invoke-UninstallFlow)") -lt $src.IndexOf("Created install root"))
 Check "U9 the config block carries the action and the history toggle" ($src -match '(?m)^\$Action\s+=\s+"Install"' -and $src -match '(?m)^\$KeepHistoryOnUninstall = \$true' -and $src -match '(?m)^\$HistoryKeepRoot\s+=')
 Check "U9 the last monitor going names the telemetry task rather than removing it" ($src -match 'telemetry publisher task .* is still scheduled' -and $src -match 'Unregister-ScheduledTask -TaskPath')
 Remove-Item function:Write-Host -ErrorAction SilentlyContinue
 Remove-Item $uRoot -Recurse -Force -ErrorAction SilentlyContinue
 function Write-Log { param($Level,$Message) }
 
+
+Section "N. The install root, the move out of the old location, and the shorter questions"
+$nRoot = [System.IO.Path]::GetFullPath((Join-Path $InstallDir 'rootmove'))
+$nTaskPath = '\CurlMonitorTest\'
+function NDropTask { param([string]$Name) try { Unregister-ScheduledTask -TaskPath $nTaskPath -TaskName $Name -Confirm:$false -ErrorAction Stop } catch { } }
+if (Test-Path $nRoot) { Remove-Item $nRoot -Recurse -Force -ErrorAction SilentlyContinue }
+$nOld = Join-Path $nRoot 'old'; $nNew = Join-Path $nRoot 'new'
+New-Item $nNew -ItemType Directory -Force | Out-Null
+$script:NLogs = @()
+function Write-Log { param($Level,$Message) $script:NLogs += "$Level|$Message" }
+$script:NOut = @()
+function Write-Host { param([Parameter(Position=0,ValueFromRemainingArguments=$true)]$Text,$ForegroundColor) $script:NOut += (@($Text) -join ' ') }
+function NOldMonitor { param([string]$Name,[string]$Url='https://example.invalid/p')
+  $dir = Join-Path $nOld (ConvertTo-MonitorSlug $Name)
+  New-Item $dir -ItemType Directory -Force | Out-Null
+  @{ MonitorName=$Name; Url=$Url; SiteName='S' } | ConvertTo-Json | Set-Content (Join-Path $dir 'install-settings.json') -Encoding UTF8
+  Set-Content (Join-Path $dir 'Watch-CurlMonitor.ps1') -Value "`$InstallDir = '$dir'`r`n`$DropLog = '$dir\Drops.log'`r`n'polling'" -Encoding UTF8
+  Set-Content (Join-Path $dir 'Latency_202609.csv') -Value 'rows' -Encoding UTF8
+  Set-Content (Join-Path $dir 'credential.bin') -Value 'secret' -Encoding UTF8
+  return $dir }
+
+Check "N1 monitors live under the plain root, with their tasks in a folder of their own" ($src -match '(?m)^\$InstallRoot\s+=\s+"C:\\ProgramData\\CurlMonitor"' -and $src -match '(?m)^\$TaskPath\s+=\s+"\\CurlMonitor\\"' -and $src -match '(?m)^\$HistoryKeepRoot\s+=\s+"C:\\ProgramData\\CurlMonitor-history"')
+Check "N1 nothing reaches up to lock C:\ProgramData itself" (-not ($src -match 'Protect-InstallFolder -Path \(Split-Path'))
+Check "N1 the older HST task is looked for in the folder it was registered in" ($src -match 'param\(\[string\]\$Dir = \$LegacyInstallDir, \[string\]\$TaskName = \$LegacyTaskName, \[string\]\$Path = \$PreviousTaskPath\)' -and $src -match 'Get-LegacyInstall -Dir \$LegacyDir -TaskName \$LegacyTask -Path \$PrevPath')
+Check "N1 the old location is still known, so installs made there can be found" ($src -match '(?m)^\$PreviousRoot\s+=\s+"C:\\ProgramData\\DIT\\CurlMonitor"' -and $src -match '(?m)^\$PreviousTaskPath\s+=\s+"\\DIT\\"')
+Check "N1 the move runs before the prompts and before the older HST layout is offered" ($src.IndexOf('Invoke-RootMove -Monitors (Get-PreviousRootMonitor)') -gt 0 -and $src.IndexOf('Invoke-RootMove -Monitors (Get-PreviousRootMonitor)') -lt $src.IndexOf('$legacy = Get-LegacyInstall' + "`n") -and $src.IndexOf('Invoke-RootMove -Monitors (Get-PreviousRootMonitor)') -lt $src.IndexOf('$MonitorName = Get-MonitorName'))
+
+$nDir = NOldMonitor -Name 'HST eChart' -Url 'https://old.invalid/health'
+$nFound = @(Get-PreviousRootMonitor -Root $nOld -Path $nTaskPath -NewRoot $nNew)
+Check "N2 a monitor in the old location is found with its URL and the task that runs it" (@($nFound).Count -eq 1 -and @($nFound)[0].Name -eq 'HST eChart' -and @($nFound)[0].Url -eq 'https://old.invalid/health' -and @($nFound)[0].TaskName -eq 'Curl Monitor - HST eChart' -and -not @($nFound)[0].HasTask)
+Check "N2 a missing old location, or one that is already the new one, finds nothing" (@(Get-PreviousRootMonitor -Root (Join-Path $nRoot 'gone') -Path $nTaskPath -NewRoot $nNew).Count -eq 0 -and @(Get-PreviousRootMonitor -Root $nNew -Path $nTaskPath -NewRoot $nNew).Count -eq 0)
+
+$script:NLogs = @()
+$null = Move-MonitorToNewRoot -Monitor @($nFound)[0] -NewRoot $nNew -NewTaskPath $nTaskPath
+$nDest = Join-Path $nNew 'HST-eChart'
+Check "N3 the folder moves with its history and its stored secret" ((Test-Path $nDest) -and -not (Test-Path $nDir) -and (Test-Path (Join-Path $nDest 'Latency_202609.csv')) -and (Test-Path (Join-Path $nDest 'credential.bin')))
+$nText = if (Test-Path (Join-Path $nDest 'Watch-CurlMonitor.ps1')) { Get-Content (Join-Path $nDest 'Watch-CurlMonitor.ps1') -Raw } else { '' }
+Check "N3 the moved monitor points at its new folder and still parses" (($nText -match [regex]::Escape($nDest)) -and -not ($nText -match [regex]::Escape($nDir)) -and $null -ne [ScriptBlock]::Create($nText))
+
+$nDir2 = NOldMonitor -Name 'HST eChart' -Url 'https://old.invalid/health'
+$nFound2 = @(Get-PreviousRootMonitor -Root $nOld -Path $nTaskPath -NewRoot $nNew)
+$script:NLogs = @()
+$nBlocked = Move-MonitorToNewRoot -Monitor @($nFound2)[0] -NewRoot $nNew -NewTaskPath $nTaskPath
+Check "N4 a monitor is never moved on top of one already installed at the new root" ((-not $nBlocked) -and (Test-Path $nDir2) -and (($script:NLogs -join "`n") -match 'already exists'))
+
+$script:NOut = @()
+Check "N5 an empty old location asks nothing and moves nothing" ((Invoke-RootMove -Monitors @() -NewRoot $nNew -OldRoot $nOld) -eq 0 -and @($script:NOut).Count -eq 0)
+
+$nRemovable = @(Get-RemovableMonitor -Root $nNew -Path $nTaskPath -LegacyDir (Join-Path $nRoot 'none') -LegacyTask 'No Legacy Task' -PrevRoot $nOld -PrevPath $nTaskPath)
+Check "N6 the removal listing reaches the old location as well as the new one" (@($nRemovable | Where-Object { $_.Kind -eq 'OldLocation' }).Count -eq 1 -and @($nRemovable | Where-Object { $_.Kind -eq 'OldLocation' })[0].Dir -eq $nDir2 -and @($nRemovable | Where-Object { $_.Kind -eq 'Monitor' }).Count -eq 1)
+
+Check "N7 every question is one short line with the answer on the next" ($src -match 'function Write-Question' -and $src -match 'Write-Question -Question "Install or uninstall\?"' -and $src -match 'Write-Question -Question "Monitor name"' -and $src -match 'Write-Question -Question "URL to watch"' -and $src -match 'Write-Question -Question "Site name"' -and $src -match 'Write-Question -Question "Text the page must contain \(optional\)"')
+Check "N7 no question prints a paragraph through the transcript log any more" (-not ($src -match 'Write-Log -Level PROMPT -Message "Name this monitor') -and -not ($src -match 'Write-Log -Level PROMPT -Message "Enter the URL') -and -not ($src -match 'Write-Log -Level PROMPT -Message "Text that must appear') -and -not ($src -match 'Write-Log -Level PROMPT -Message "Enter the site name'))
+$script:NOut = @()
+$NonInteractive = $true
+Write-Question -Question "Nothing should print" -Hint "not this either"
+$NonInteractive = $false
+Write-Question -Question "Monitor name" -Hint @("first line", "second line")
+Check "N7 a question prints nothing when nobody is there to answer it" (@($script:NOut).Count -eq 4 -and $script:NOut[1] -eq 'Monitor name' -and $script:NOut[2] -eq '  first line' -and $script:NOut[3] -eq '  second line')
+
+NDropTask -Name 'Curl Monitor - HST eChart'
+Check "N8 the move leaves no test task behind" (@(Get-ScheduledTask -TaskPath $nTaskPath -ErrorAction SilentlyContinue).Count -eq 0)
+Remove-Item function:Write-Host -ErrorAction SilentlyContinue
+function Write-Log { param($Level,$Message) }
+Remove-Item $nRoot -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host ""
 Write-Host "TOTAL: $script:pass passed, $script:fail failed"

@@ -18,7 +18,7 @@
     Folder for the token, the publish state, and the endpoint map. Never published.
 
 .PARAMETER TaskPath
-    Task Scheduler folder. Default \DIT\.
+    Task Scheduler folder. Default \CurlMonitor\.
 
 .PARAMETER NonInteractive
     Uses the parameter values without prompting. Requires -RepoUrl, -AuthorName, -AuthorEmail, and -Token.
@@ -34,10 +34,10 @@
 [CmdletBinding()]
 param(
     [string]$PublisherPath = '',
-    [string]$StateDir = 'C:\ProgramData\DIT\Telemetry',
-    [string]$RepoPath = 'C:\ProgramData\DIT\Telemetry\curl-monitor',
-    [string]$MonitorRoot = 'C:\ProgramData\DIT\CurlMonitor',
-    [string]$TaskPath = '\DIT\',
+    [string]$StateDir = 'C:\ProgramData\CurlMonitor-telemetry',
+    [string]$RepoPath = 'C:\ProgramData\CurlMonitor-telemetry\curl-monitor',
+    [string]$MonitorRoot = 'C:\ProgramData\CurlMonitor',
+    [string]$TaskPath = '\CurlMonitor\',
     [string]$TaskName = 'Curl Monitor telemetry publisher',
     [string]$RepoUrl = '',
     [string]$AuthorName = '',
