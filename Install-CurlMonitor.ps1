@@ -110,6 +110,10 @@ $MailTo                = @()                           # Prompted. One or more r
 $SmtpAuthUser          = ""                            # Authenticated only. Password is prompted, never stored here.
 
 # Installer behavior
+$Action                = "Install"                     # Install or Uninstall. Interactive runs ask; non-interactive runs use this.
+$KeepHistoryOnUninstall = $true                        # Uninstall: $true moves the latency CSVs, outages, and drops log aside first
+$HistoryKeepRoot       = "C:\ProgramData\DIT\CurlMonitor-history"
+$TelemetryTaskName     = "Curl Monitor telemetry publisher"
 $NonInteractive        = $false                        # $true = no prompts, use the config block, for RMM deployment
 $SiteNameOverride      = ""                            # Used when non-interactive, otherwise prompted
 $MonitorNameOverride   = ""                            # Used when non-interactive, otherwise prompted
@@ -1497,6 +1501,293 @@ function Invoke-LegacyMigration {
     }
 }
 
+function Get-FolderSizeText {
+    # Human-sized total of a folder, for the removal listing
+    param([string]$Path)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return 'no folder' }
+    $bytes = 0
+    try { $bytes = [int64](Get-ChildItem -LiteralPath $Path -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum } catch { }
+    if ($bytes -ge 1MB) { return "{0:N1} MB" -f ($bytes / 1MB) }
+    if ($bytes -ge 1KB) { return "{0:N0} KB" -f ($bytes / 1KB) }
+    return "$bytes bytes"
+}
+
+function Get-RemovableMonitor {
+    # Everything an uninstall could remove: installed monitors, a task whose folder was deleted by hand, and the
+    # older HST-only layout. Paths and task names are parameters so tests drive scratch roots.
+    param(
+        [string]$Root = $InstallRoot,
+        [string]$Path = $TaskPath,
+        [string]$Prefix = $TaskNamePrefix,
+        [string]$LegacyDir = $LegacyInstallDir,
+        [string]$LegacyTask = $LegacyTaskName,
+        [string]$LegacyName = $LegacyMonitorName
+    )
+    $items = New-Object System.Collections.ArrayList
+    $seen = @()
+    foreach ($m in @(Get-InstalledMonitor -Root $Root)) {
+        $taskName = $Prefix + $m.Name
+        $task = Get-ScheduledTask -TaskName $taskName -TaskPath $Path -ErrorAction SilentlyContinue
+        $seen += $taskName
+        [void]$items.Add([PSCustomObject]@{
+            Name = $m.Name; Slug = $m.Slug; Dir = $m.Path; Url = $m.Url; Kind = 'Monitor'
+            TaskName = $taskName; TaskPath = $Path; TaskState = $(if ($task) { "$($task.State)" } else { 'no task' })
+        })
+    }
+    # A removal that could not finish leaves a folder with no settings file behind. It still has to be listed, or
+    # the operator can never finish the job through the installer.
+    $seenDirs = @(@($items) | ForEach-Object { $_.Dir })
+    foreach ($dir in @(Get-ChildItem -Path $Root -Directory -Force -ErrorAction SilentlyContinue)) {
+        if ($seenDirs -contains $dir.FullName) { continue }
+        $taskName = $Prefix + $dir.Name
+        $task = Get-ScheduledTask -TaskName $taskName -TaskPath $Path -ErrorAction SilentlyContinue
+        $seen += $taskName
+        [void]$items.Add([PSCustomObject]@{
+            Name = $dir.Name; Slug = $dir.Name; Dir = $dir.FullName; Url = ''; Kind = 'Leftover'
+            TaskName = $taskName; TaskPath = $Path; TaskState = $(if ($task) { "$($task.State)" } else { 'no task' })
+        })
+    }
+    foreach ($task in @(Get-ScheduledTask -TaskPath $Path -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -and $_.TaskName.StartsWith($Prefix, [StringComparison]::OrdinalIgnoreCase) })) {
+        if ($seen -contains $task.TaskName) { continue }
+        $name = $task.TaskName.Substring($Prefix.Length)
+        [void]$items.Add([PSCustomObject]@{
+            Name = $name; Slug = (ConvertTo-MonitorSlug $name); Dir = (Join-Path $Root (ConvertTo-MonitorSlug $name)); Url = ''; Kind = 'TaskOnly'
+            TaskName = $task.TaskName; TaskPath = $Path; TaskState = "$($task.State)"
+        })
+    }
+    $legacy = Get-LegacyInstall -Dir $LegacyDir -TaskName $LegacyTask -Path $Path
+    if ($legacy) {
+        $lt = Get-ScheduledTask -TaskName $LegacyTask -TaskPath $Path -ErrorAction SilentlyContinue
+        [void]$items.Add([PSCustomObject]@{
+            Name = "$LegacyName (older layout)"; Slug = ''; Dir = $legacy.Dir; Url = $legacy.Url; Kind = 'Legacy'
+            TaskName = $LegacyTask; TaskPath = $Path; TaskState = $(if ($lt) { "$($lt.State)" } else { 'no task' })
+        })
+    }
+    return @($items)
+}
+
+function Show-RemovableMonitor {
+    # Prints the numbered listing the operator picks from
+    param([object[]]$Items)
+    $i = 0
+    foreach ($m in @($Items)) {
+        $i++
+        Write-Host ("  {0}. {1}" -f $i, $m.Name)
+        Write-Host ("     URL    : {0}" -f $(if ($m.Url) { $m.Url } else { 'not recorded' }))
+        Write-Host ("     Task   : {0}{1} ({2})" -f $m.TaskPath, $m.TaskName, $m.TaskState)
+        Write-Host ("     Folder : {0} ({1})" -f $m.Dir, (Get-FolderSizeText $m.Dir))
+    }
+}
+
+function Select-RemovableMonitor {
+    # Resolves a typed name to one monitor. Exact spelling wins, then case-insensitive, then the folder slug.
+    param([Parameter(Mandatory)][object[]]$Items, [Parameter(Mandatory)][string]$Requested)
+    $list = @($Items)
+    $wanted = "$Requested".Trim()
+    if (-not $wanted) { Write-Log -Level WARNING -Message "Type a number, a name, or X to cancel."; return $null }
+    $match = @($list | Where-Object { $_.Name -ceq $wanted })
+    if (@($match).Count -eq 0) { $match = @($list | Where-Object { $_.Name -eq $wanted }) }
+    if (@($match).Count -eq 0) {
+        $slug = ConvertTo-MonitorSlug $wanted
+        if ($slug) { $match = @($list | Where-Object { $_.Slug -and $_.Slug -eq $slug }) }
+    }
+    if (@($match).Count -eq 1) { return @($match)[0] }
+    if (@($match).Count -gt 1) {
+        Write-Log -Level WARNING -Message "'$wanted' matches more than one monitor: $((@($match) | ForEach-Object { $_.Name }) -join ', '). Use its number instead."
+        return $null
+    }
+    Write-Log -Level WARNING -Message "No monitor called '$wanted'. Installed: $((@($list) | ForEach-Object { $_.Name }) -join ', ')."
+    return $null
+}
+
+function Stop-MonitorProcess {
+    # A monitor process outliving its task keeps the folder locked, so it is stopped by the path it runs from
+    param([Parameter(Mandatory)][string]$Dir)
+    $pattern = "*" + [Management.Automation.WildcardPattern]::Escape($Dir) + "*"
+    $found = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine -like $pattern })
+    $stopped = 0
+    foreach ($p in $found) {
+        try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop; $stopped++ } catch { }
+    }
+    for ($i = 0; $i -lt 20 -and $stopped -gt 0; $i++) {
+        Start-Sleep -Milliseconds 300
+        $still = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine -like $pattern })
+        if (@($still).Count -eq 0) { break }
+    }
+    if ($stopped) { Write-Log -Level INFORMATIONAL -Message "Stopped $stopped monitor process(es) still running from '$Dir'." }
+    return $stopped
+}
+
+function Move-MonitorHistory {
+    # Moves the measurement history out of the folder before the rest goes. Returns the destination, or $null.
+    param([Parameter(Mandatory)]$Monitor, [string]$KeepRoot = $HistoryKeepRoot)
+    if (-not (Test-Path -LiteralPath $Monitor.Dir)) { return $null }
+    $files = @(Get-ChildItem -LiteralPath $Monitor.Dir -File -Force -ErrorAction SilentlyContinue | Where-Object {
+        $_.Name -like 'Latency_*.csv' -or $_.Name -like 'Outages*.csv' -or $_.Name -like 'Drops*.log' -or $_.Name -like 'HST-eChart-*'
+    })
+    if (@($files).Count -eq 0) { return $null }
+    $slug = if ($Monitor.Slug) { $Monitor.Slug } else { ConvertTo-MonitorSlug $Monitor.Name }
+    if (-not $slug) { $slug = 'monitor' }
+    $dest = Join-Path $KeepRoot ("{0}_{1}" -f $slug, (Get-Date -Format 'yyyyMMdd_HHmmss'))
+    try { if (-not (Test-Path -LiteralPath $dest)) { New-Item -Path $dest -ItemType Directory -Force -ErrorAction Stop | Out-Null } }
+    catch {
+        Write-Log -Level WARNING -Message "Could not create '$dest' for the kept history. $($_.Exception.Message) The history stays with the folder and goes with it."
+        return $null
+    }
+    $moved = 0
+    foreach ($f in $files) {
+        $target = Join-Path $dest $f.Name
+        if (Test-Path -LiteralPath $target) { $target = Join-Path $dest ("{0}_{1}{2}" -f $f.BaseName, (Get-Date -Format 'HHmmssfff'), $f.Extension) }
+        try { Move-Item -LiteralPath $f.FullName -Destination $target -Force -ErrorAction Stop; $moved++ }
+        catch { Write-Log -Level WARNING -Message "Could not keep '$($f.Name)'. $($_.Exception.Message)" }
+    }
+    if ($moved -eq 0) {
+        Remove-Item -LiteralPath $dest -Recurse -Force -ErrorAction SilentlyContinue
+        return $null
+    }
+    Write-Log -Level CREATED -Message "Kept $moved history file(s) in '$dest'."
+    return $dest
+}
+
+function Remove-MonitorInstall {
+    # Stops the task and its process, keeps the history when asked, then deletes the folder. Never throws, and
+    # never touches another monitor. Returns what was and was not removed.
+    param([Parameter(Mandatory)]$Monitor, [bool]$KeepHistory = $true, [string]$KeepRoot = $HistoryKeepRoot)
+    $problems = New-Object System.Collections.ArrayList
+    $taskRemoved = $false
+    $task = Get-ScheduledTask -TaskName $Monitor.TaskName -TaskPath $Monitor.TaskPath -ErrorAction SilentlyContinue
+    if ($task) {
+        try { Stop-ScheduledTask -TaskName $Monitor.TaskName -TaskPath $Monitor.TaskPath -ErrorAction SilentlyContinue } catch { }
+        for ($i = 0; $i -lt 15; $i++) {
+            $t = Get-ScheduledTask -TaskName $Monitor.TaskName -TaskPath $Monitor.TaskPath -ErrorAction SilentlyContinue
+            if (-not $t -or "$($t.State)" -ne 'Running') { break }
+            Start-Sleep -Seconds 1
+        }
+        try {
+            Unregister-ScheduledTask -TaskName $Monitor.TaskName -TaskPath $Monitor.TaskPath -Confirm:$false -ErrorAction Stop
+            $taskRemoved = $true
+            Write-Log -Level INFORMATIONAL -Message "Removed the task '$($Monitor.TaskPath)$($Monitor.TaskName)'."
+        }
+        catch { [void]$problems.Add("the task '$($Monitor.TaskPath)$($Monitor.TaskName)' could not be removed: $($_.Exception.Message)") }
+    }
+    else {
+        $taskRemoved = $true
+        Write-Log -Level INFORMATIONAL -Message "No task '$($Monitor.TaskPath)$($Monitor.TaskName)' to remove."
+    }
+    if (Test-Path -LiteralPath $Monitor.Dir) { $null = Stop-MonitorProcess -Dir $Monitor.Dir }
+    $historyPath = $null
+    if ($KeepHistory) { $historyPath = Move-MonitorHistory -Monitor $Monitor -KeepRoot $KeepRoot }
+    $folderRemoved = $false
+    if (Test-Path -LiteralPath $Monitor.Dir) {
+        try { Remove-Item -LiteralPath $Monitor.Dir -Recurse -Force -ErrorAction Stop; $folderRemoved = $true }
+        catch {
+            Start-Sleep -Seconds 2
+            try { Remove-Item -LiteralPath $Monitor.Dir -Recurse -Force -ErrorAction Stop; $folderRemoved = $true }
+            catch { [void]$problems.Add("the folder '$($Monitor.Dir)' could not be deleted: $($_.Exception.Message)") }
+        }
+        if ($folderRemoved) { Write-Log -Level INFORMATIONAL -Message "Deleted '$($Monitor.Dir)'." }
+    }
+    else {
+        $folderRemoved = $true
+        Write-Log -Level INFORMATIONAL -Message "No folder '$($Monitor.Dir)' to delete."
+    }
+    return [PSCustomObject]@{
+        Name = $Monitor.Name; TaskRemoved = $taskRemoved; FolderRemoved = $folderRemoved
+        HistoryPath = $historyPath; Problems = @($problems)
+    }
+}
+
+function Invoke-UninstallFlow {
+    # Lists what is installed, removes the chosen monitor, and says exactly what went and what stayed.
+    param(
+        [string]$Requested = $MonitorNameOverride,
+        [bool]$KeepHistory = $KeepHistoryOnUninstall,
+        [string]$Root = $InstallRoot,
+        [string]$Path = $TaskPath,
+        [string]$KeepRoot = $HistoryKeepRoot
+    )
+    $items = @(Get-RemovableMonitor -Root $Root -Path $Path)
+    if (@($items).Count -eq 0) {
+        Write-Log -Level FOUND -Message "No monitor is installed under '$Root' and no monitor task exists under '$Path'. Nothing to remove."
+        return 0
+    }
+    Write-Host ""
+    Write-Host "Installed monitors"
+    Show-RemovableMonitor -Items $items
+    Write-Host ""
+    $target = $null
+    if ($Requested) {
+        $target = Select-RemovableMonitor -Items $items -Requested $Requested
+        if (-not $target) { Write-Log -Level FAILED -Message "Nothing was removed."; return 1 }
+    }
+    elseif ($NonInteractive) {
+        if (@($items).Count -eq 1) { $target = @($items)[0] }
+        else {
+            Write-Log -Level FAILED -Message "$(@($items).Count) monitors are installed. Set `$MonitorNameOverride to the one to remove. Nothing was removed."
+            return 1
+        }
+    }
+    else {
+        $default = if (@($items).Count -eq 1) { '1' } else { '' }
+        while (-not $target) {
+            $typed = "$(Read-Setting -Prompt "Remove which monitor? Type its number or its name, X to cancel" -Default $default)".Trim()
+            if (-not $typed) { Write-Log -Level WARNING -Message "Type a number, a name, or X to cancel."; continue }
+            if ($typed -eq 'X' -or $typed -eq 'x') { Write-Log -Level FOUND -Message "Cancelled. Nothing was removed."; return 0 }
+            $n = 0
+            if ([int]::TryParse($typed, [ref]$n)) {
+                if ($n -ge 1 -and $n -le @($items).Count) { $target = @($items)[$n - 1] }
+                else { Write-Log -Level WARNING -Message "Pick a number between 1 and $(@($items).Count)." }
+                continue
+            }
+            $target = Select-RemovableMonitor -Items $items -Requested $typed
+        }
+    }
+    $others = @($items | Where-Object { $_.Name -cne $target.Name })
+    Write-Host ""
+    Write-Host "About to remove"
+    Write-Host "  Monitor         : $($target.Name)"
+    Write-Host "  Task            : $($target.TaskPath)$($target.TaskName) ($($target.TaskState))"
+    Write-Host "  Folder          : $($target.Dir) ($(Get-FolderSizeText $target.Dir))"
+    Write-Host "  Left alone      : $(if (@($others).Count) { (@($others) | ForEach-Object { $_.Name }) -join ', ' } else { 'nothing else is installed' })"
+    Write-Host ""
+    if (-not $NonInteractive) {
+        if ((Read-Choice -Prompt "Remove it? Y = remove, N = cancel" -Allowed @('Y','N') -Default 'N') -ne 'Y') {
+            Write-Log -Level FOUND -Message "Cancelled. Nothing was removed."
+            return 0
+        }
+        $KeepHistory = (Read-Choice -Prompt "Keep the measurement history? Y = move the latency CSVs, outages, and drops log aside, N = delete them with the folder" -Allowed @('Y','N') -Default 'Y') -eq 'Y'
+        if (-not $KeepHistory) { Write-Log -Level WARNING -Message "The history is deleted with the folder. That cannot be undone." }
+    }
+    $result = Remove-MonitorInstall -Monitor $target -KeepHistory $KeepHistory -KeepRoot $KeepRoot
+    $left = @(Get-RemovableMonitor -Root $Root -Path $Path)
+    if (@($left).Count -eq 0 -and (Test-Path -LiteralPath $Root)) {
+        if (@(Get-ChildItem -LiteralPath $Root -Force -ErrorAction SilentlyContinue).Count -eq 0) {
+            try { Remove-Item -LiteralPath $Root -Force -ErrorAction Stop; Write-Log -Level INFORMATIONAL -Message "Removed the empty install root '$Root'." } catch { }
+        }
+    }
+    Write-Host ""
+    Write-Host "Removal summary"
+    Write-Host "  Monitor         : $($target.Name)"
+    Write-Host "  Task            : $($target.TaskPath)$($target.TaskName) ($(if ($result.TaskRemoved) { 'removed' } else { 'still there' }))"
+    Write-Host "  Folder          : $($target.Dir) ($(if ($result.FolderRemoved) { 'deleted' } else { 'still there' }))"
+    Write-Host "  History         : $(if ($result.HistoryPath) { "kept in $($result.HistoryPath)" } elseif ($KeepHistory) { 'none to keep' } else { 'deleted with the folder' })"
+    Write-Host "  Still installed : $(if (@($left).Count) { (@($left) | ForEach-Object { $_.Name }) -join ', ' } else { 'nothing' })"
+    Write-Host ""
+    if (@($left).Count -eq 0) {
+        $telemetry = Get-ScheduledTask -TaskName $TelemetryTaskName -TaskPath $Path -ErrorAction SilentlyContinue
+        if ($telemetry) {
+            Write-Log -Level WARNING -Message "The telemetry publisher task '$Path$TelemetryTaskName' is still scheduled and has nothing left to publish. Remove it with: Unregister-ScheduledTask -TaskPath '$Path' -TaskName '$TelemetryTaskName' -Confirm:`$false"
+        }
+    }
+    if (@($result.Problems).Count) {
+        foreach ($p in @($result.Problems)) { Write-Log -Level FAILED -Message "Not fully removed: $p" }
+        Write-Log -Level FAILED -Message "Finish by hand, then run the uninstall again to confirm."
+        return 1
+    }
+    Write-Log -Level FINISHED -Message "Removed '$($target.Name)'."
+    return 0
+}
+
 function New-MonitorContent {
     # Builds the monitor script text from the embedded template with values baked in. One regex pass over the
     # template means a value that happens to contain a token is inserted as-is, never substituted again.
@@ -2672,6 +2963,15 @@ if (-not (Get-Command Register-ScheduledTask -ErrorAction SilentlyContinue)) {
     exit 1
 }
 Write-Log -Level "SANITY CHECK" -Message "ScheduledTasks module present."
+
+if ("$Action" -ne 'Install' -and "$Action" -ne 'Uninstall') {
+    Write-Log -Level FAILED -Message "Unknown action '$Action'. Set `$Action to Install or Uninstall. Exiting."
+    exit 1
+}
+if (-not $NonInteractive) {
+    $Action = if ((Read-Choice -Prompt "Install or upgrade a monitor, or remove one? I = install or upgrade, U = uninstall" -Allowed @('I','U') -Default 'I') -eq 'U') { 'Uninstall' } else { 'Install' }
+}
+if ("$Action" -eq 'Uninstall') { exit (Invoke-UninstallFlow) }
 
 if (-not (Test-Path $InstallRoot)) {
     try {

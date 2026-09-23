@@ -49,6 +49,16 @@ Requirements: Windows Server or Windows 10/11 with Windows PowerShell 5.1, curl.
 | `Test-CurlMonitorInstallLocal.ps1` | End-to-end test that runs the real installer twice from an elevated console and verifies the result. |
 | `PSScriptAnalyzerSettings.psd1` | Analyzer settings with the deliberate rule exclusions. |
 
+## Removing a monitor
+
+The installer's first question is whether to install or remove. Answering U lists every monitor on the server with its URL, task, and data size, and removes the one you pick: its task, its folder, its stored credential, and its generated script. Other monitors are untouched.
+
+It asks separately about the measurement history, defaulting to keeping it. Kept history moves to `C:\ProgramData\DIT\CurlMonitor-history` under a dated folder named in the run. Deleting it is permanent.
+
+An older `HSTProbe` install and anything a part-finished removal left behind are listed for removal too. When the last monitor goes and the telemetry publisher is still scheduled, the run names the command to remove that task rather than removing it silently.
+
+For an RMM, set `$Action = "Uninstall"` with `$MonitorNameOverride` and `$KeepHistoryOnUninstall` in the config block. Several monitors installed and no name given refuses and removes nothing.
+
 ## Checking a server
 
 Copy `Test-CurlMonitorHealth.ps1` to the server and run it from an elevated Windows PowerShell console.

@@ -67,7 +67,8 @@ Check "Exchange module session disconnected in finally" ($src -match 'finally \{
 Check "Setup module removed automatically after setup" ($src -match 'function Remove-TenantSetupModules' -and $src.Contains('{ Remove-TenantSetupModules }'))
 Check "No Microsoft.Graph module dependency" (-not ($src -match 'Microsoft\.Graph\.|Connect-MgGraph|Get-Mg|New-Mg|Add-Mg'))
 Check "Only ExchangeOnlineManagement is installed" (([regex]::Matches($src,"Test-RequiredModule -Name '([^']+)'") | % { $_.Groups[1].Value } | Sort-Object -Unique) -join ',' -eq 'ExchangeOnlineManagement')
-Check "Module install and removal have no Y/N prompts" (-not ($src -match 'Read-Choice -Prompt "Install') -and -not ($src -match 'Read-Choice -Prompt "Remove'))
+$moduleBody = $src.Substring($src.IndexOf('function Test-RequiredModule'), $src.IndexOf('function ConvertTo-Base64Url') - $src.IndexOf('function Test-RequiredModule'))
+Check "Module install and removal have no Y/N prompts" (-not ($moduleBody -match 'Read-Choice') -and $moduleBody -match 'Install-Module' -and $moduleBody -match 'Uninstall-Module')
 Check "Browser auth-code sign-in for Graph, device code as fallback" ($src -match 'oauth2/v2\.0/authorize' -and $src -match 'code_challenge_method=S256' -and $src -match 'oauth2/v2\.0/devicecode')
 Check "Graph setup uses REST endpoints" ($src.Contains('/addPassword') -and $src.Contains('appRoleAssignments'))
 $rawReadHost = [regex]::Matches($src,'(?m)^\s*\$\w+\s*=\s*Read-Host\b(?![^\n]*-AsSecureString)') | ? { $_.Value -notmatch '\$entry\s*=' }
@@ -86,7 +87,8 @@ Check "Probe follows redirects with a bounded hop count" ($template -match '-L -
 Check "Install-time preflight follows redirects too" ($src -match 'function Test-EndpointReachable[\s\S]*?-L --max-redirs \$MaxRedirects')
 Check "URL, monitor name, and content marker are prompted, not hardcoded" ($src -match '(?m)^\$Url\s+=\s+""\s' -and $src -match '(?m)^\$MonitorName\s+=\s+""\s' -and $src -match '(?m)^\$ExpectedContentMarker\s+=\s+""\s' -and $src -match 'function Get-MonitorUrl' -and $src -match 'function Get-MonitorName' -and $src -match 'function Get-ContentMarker')
 Check "Task cmdlets stop on error and registration is verified" ($src -match 'Register-ScheduledTask[^\n]*-ErrorAction Stop' -and $src -match 'Get-ScheduledTask -TaskName \$TaskName -TaskPath \$TaskPath -ErrorAction Stop' -and $src -match 'Start-ScheduledTask -TaskName \$TaskName -TaskPath \$TaskPath -ErrorAction Stop')
-Check "Existing task replaced in place, unregister only for the older install" ((([regex]::Matches($src, 'Unregister-ScheduledTask')).Count -eq 1) -and $src -match '(?s)function Invoke-LegacyMigration.*?Unregister-ScheduledTask' -and $src -match 'Register-ScheduledTask[^\n]*-Force')
+$installTail = $src.Substring($src.IndexOf('$MonitorName = Get-MonitorName'))
+Check "Existing task replaced in place, unregister only for the older install" ((-not ($installTail -match 'Unregister-ScheduledTask')) -and $src -match '(?s)function Invoke-LegacyMigration.*?Unregister-ScheduledTask' -and $src -match 'Register-ScheduledTask[^\n]*-Force')
 Check "Monitor staged as .new and swapped in after verification" ($src -match '\$stagedPath = "\$monitorPath\.new"' -and $src -match 'Move-Item -Path \$stagedPath -Destination \$monitorPath -Force -ErrorAction Stop')
 Check "InstalledAt recorded only after the task is running" ($src -match "(?s)if \(\`$taskState -eq 'Running'\) \{\s*\`$settings\['InstalledAt'\]")
 Check "Monitor failure test includes the curl exit code" ($template -match '\$failed\s+=\s+\(\$result\.CurlExit -ne 0\) -or')
@@ -1606,6 +1608,108 @@ try { $svc = New-Object -ComObject Schedule.Service; $svc.Connect(); $svc.GetFol
 Check "M10 the test task is gone again" ($null -eq (Get-ScheduledTask -TaskPath $taskPathTest -TaskName $taskNameTest -ErrorAction SilentlyContinue))
 $ErrorActionPreference = $savedEap
 Remove-Item $tRoot -Recurse -Force -ErrorAction SilentlyContinue
+
+
+Section "U. Uninstall: listing, selection, removal, and the broken shapes"
+foreach ($f in $ast.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in @('Get-FolderSizeText','Get-RemovableMonitor','Show-RemovableMonitor','Select-RemovableMonitor','Stop-MonitorProcess','Move-MonitorHistory','Remove-MonitorInstall','Invoke-UninstallFlow')},$false)) { Invoke-Expression $f.Extent.Text }
+$uRoot = Join-Path $InstallDir 'uninstall'
+$uKeep = Join-Path $InstallDir 'uninstall-kept'
+$uTaskPath = '\NoSuchTaskPath\'
+$script:ULogs = @()
+function Write-Log { param($Level,$Message) $script:ULogs += "$Level|$Message" }
+$script:UOut = @()
+function Write-Host { param([Parameter(Position=0,ValueFromRemainingArguments=$true)]$Text,$ForegroundColor) $script:UOut += (@($Text) -join ' ') }
+$script:UQ = [System.Collections.Queue]::new()
+function UAnswers($a) { $script:UQ.Clear(); foreach ($x in $a) { $script:UQ.Enqueue($x) } }
+function Read-Setting { param([string]$Prompt,[string]$Default="") if ($script:UQ.Count -eq 0) { throw "unexpected prompt: $Prompt" }; $v = $script:UQ.Dequeue(); if ([string]::IsNullOrWhiteSpace($v)) { return $Default }; return $v }
+function Read-Choice { param([string]$Prompt,[string[]]$Allowed,[string]$Default) if ($script:UQ.Count -eq 0) { throw "unexpected choice: $Prompt" }; while ($true) { $v = $script:UQ.Dequeue(); if ([string]::IsNullOrWhiteSpace($v)) { return $Default }; $v = $v.Trim().ToUpper(); if ($Allowed -contains $v) { return $v }; if ($script:UQ.Count -eq 0) { return $Default } } }
+function UMonitor { param([string]$Name,[string]$Root,[string]$Url='https://example.invalid/p')
+  $dir = Join-Path $Root (ConvertTo-MonitorSlug $Name)
+  New-Item $dir -ItemType Directory -Force | Out-Null
+  @{ MonitorName=$Name; Url=$Url; SiteName='S' } | ConvertTo-Json | Set-Content (Join-Path $dir 'install-settings.json') -Encoding UTF8
+  foreach ($f in @('Watch-CurlMonitor.ps1','credential.bin','Outages.csv','Drops.log','Transcript_20260923.log',("Latency_" + (Get-Date -Format 'yyyyMM') + ".csv"))) { Set-Content (Join-Path $dir $f) -Value 'x' -Encoding UTF8 }
+  return $dir }
+function UReset { param([string]$Dir) if (Test-Path $Dir) { Get-ChildItem $Dir -Recurse -File -Force -ErrorAction SilentlyContinue | ForEach-Object { try { $_.IsReadOnly = $false } catch { } }; Remove-Item $Dir -Recurse -Force -ErrorAction SilentlyContinue }; New-Item $Dir -ItemType Directory -Force | Out-Null }
+$NonInteractive = $false; $MonitorNameOverride = ''
+
+UReset $uRoot
+$null = UMonitor -Name 'HST eChart' -Root $uRoot
+$null = UMonitor -Name 'Patient Portal' -Root $uRoot -Url 'https://portal.invalid/'
+New-Item (Join-Path $uRoot 'half-removed') -ItemType Directory -Force | Out-Null
+Set-Content (Join-Path $uRoot 'half-removed\Drops.log') -Value 'x' -Encoding UTF8
+$uItems = @(Get-RemovableMonitor -Root $uRoot -Path $uTaskPath -LegacyDir (Join-Path $uRoot 'none') -LegacyTask 'No Legacy Task')
+Check "U1 listing covers installed monitors and a folder left by a part-finished removal" (@($uItems).Count -eq 3 -and @($uItems | Where-Object { $_.Kind -eq 'Leftover' -and $_.Name -eq 'half-removed' }).Count -eq 1 -and @($uItems | Where-Object { $_.Url -eq 'https://portal.invalid/' }).Count -eq 1 -and @($uItems | Where-Object { $_.TaskState -eq 'no task' }).Count -eq 3)
+Check "U1 folder size reads as a size, not a byte dump" ((Get-FolderSizeText (@($uItems)[0].Dir)) -match '(bytes|KB|MB)$' -and (Get-FolderSizeText (Join-Path $uRoot 'gone')) -eq 'no folder')
+Check "U2 a name resolves exactly, by case, and by folder spelling" ((Select-RemovableMonitor -Items $uItems -Requested 'HST eChart').Name -eq 'HST eChart' -and (Select-RemovableMonitor -Items $uItems -Requested 'hst echart').Name -eq 'HST eChart' -and (Select-RemovableMonitor -Items $uItems -Requested 'HST_eChart').Name -eq 'HST eChart')
+$script:ULogs = @()
+Check "U2 an unknown or empty name is refused and names what is installed" ($null -eq (Select-RemovableMonitor -Items $uItems -Requested 'Nope') -and $null -eq (Select-RemovableMonitor -Items $uItems -Requested '  ') -and ($script:ULogs -join "`n") -match "No monitor called 'Nope'\. Installed: ")
+UAnswers @('X')
+Check "U3 X cancels and removes nothing" ((Invoke-UninstallFlow -Root $uRoot -Path $uTaskPath -KeepRoot $uKeep) -eq 0 -and @(Get-RemovableMonitor -Root $uRoot -Path $uTaskPath).Count -eq 3)
+UAnswers @('', '9', 'nope', '1', '')
+$script:ULogs = @()
+Check "U3 blank, out of range and junk are refused, and the confirmation defaults to no" ((Invoke-UninstallFlow -Root $uRoot -Path $uTaskPath -KeepRoot $uKeep) -eq 0 -and @(Get-RemovableMonitor -Root $uRoot -Path $uTaskPath).Count -eq 3 -and ($script:ULogs -join "`n") -match 'Pick a number between 1 and 3' -and ($script:ULogs -join "`n") -match 'Cancelled\. Nothing was removed')
+UAnswers @('hst echart', 'Y', 'Y')
+$rcU = Invoke-UninstallFlow -Root $uRoot -Path $uTaskPath -KeepRoot $uKeep
+$uLeft = @(Get-RemovableMonitor -Root $uRoot -Path $uTaskPath)
+$uKept = @(Get-ChildItem $uKeep -Directory -ErrorAction SilentlyContinue)
+Check "U4 picking by name removes that monitor only, and keeps its history" ($rcU -eq 0 -and @($uLeft).Count -eq 2 -and -not (Test-Path (Join-Path $uRoot 'HST-eChart')) -and (Test-Path (Join-Path $uRoot 'Patient-Portal\credential.bin')) -and @($uKept).Count -eq 1 -and @(Get-ChildItem $uKept[0].FullName -File).Count -eq 3)
+UAnswers @('Patient Portal', 'Y', 'N')
+$script:ULogs = @()
+$rcU = Invoke-UninstallFlow -Root $uRoot -Path $uTaskPath -KeepRoot $uKeep
+Check "U4 deleting the history says it cannot be undone and keeps nothing" ($rcU -eq 0 -and @(Get-ChildItem $uKeep -Directory).Count -eq 1 -and ($script:ULogs -join "`n") -match 'cannot be undone')
+Check "U4 the summary says what went and what is still installed" ((($script:UOut -join "`n") -match '(?s)Removal summary.*Folder\s+: .*deleted.*Still installed : half-removed'))
+
+UReset $uRoot
+$uLegacy = Join-Path $uRoot 'HSTProbe'
+New-Item $uLegacy -ItemType Directory -Force | Out-Null
+@{ Url='https://legacy.invalid/x'; SiteName='Old' } | ConvertTo-Json | Set-Content (Join-Path $uLegacy 'install-settings.json') -Encoding UTF8
+Set-Content (Join-Path $uLegacy 'HST-eChart-Latency_202609.csv') -Value 'a,b' -Encoding UTF8
+$uLeg = @(Get-RemovableMonitor -Root (Join-Path $uRoot 'empty') -Path $uTaskPath -LegacyDir $uLegacy -LegacyTask 'No Legacy Task')
+$uLegRes = Remove-MonitorInstall -Monitor @($uLeg)[0] -KeepHistory $true -KeepRoot $uKeep
+Check "U5 the older layout is listed with its URL, removed, and its HST-named history kept" (@($uLeg).Count -eq 1 -and @($uLeg)[0].Kind -eq 'Legacy' -and @($uLeg)[0].Url -eq 'https://legacy.invalid/x' -and $uLegRes.FolderRemoved -and -not (Test-Path $uLegacy) -and @(Get-ChildItem $uLegRes.HistoryPath -Filter 'HST-eChart-*').Count -eq 1)
+
+UReset $uRoot
+$uLock = UMonitor -Name 'Locked' -Root $uRoot
+$uHandle = [System.IO.File]::Open((Join-Path $uLock 'Transcript_20260923.log'), 'Open', 'Read', 'None')
+$uLockRes = Remove-MonitorInstall -Monitor @(Get-RemovableMonitor -Root $uRoot -Path $uTaskPath)[0] -KeepHistory $true -KeepRoot $uKeep
+$uHandle.Close()
+Check "U6 a file held open keeps the folder and names the failure, history still saved" (-not $uLockRes.FolderRemoved -and @($uLockRes.Problems).Count -eq 1 -and @($uLockRes.Problems)[0] -match 'could not be deleted' -and @(Get-ChildItem $uLockRes.HistoryPath -File).Count -eq 3)
+$uLockRes2 = Remove-MonitorInstall -Monitor @(Get-RemovableMonitor -Root $uRoot -Path $uTaskPath)[0] -KeepHistory $true -KeepRoot $uKeep
+Check "U6 running it again once the lock is gone finishes the removal" ($uLockRes2.FolderRemoved -and @($uLockRes2.Problems).Count -eq 0 -and -not (Test-Path $uLock))
+
+UReset $uRoot
+$null = UMonitor -Name 'Alpha' -Root $uRoot
+$null = UMonitor -Name 'Beta' -Root $uRoot
+$NonInteractive = $true
+$script:ULogs = @()
+Check "U7 non-interactive with several monitors and no name refuses and removes nothing" ((Invoke-UninstallFlow -Requested '' -Root $uRoot -Path $uTaskPath -KeepRoot $uKeep) -eq 1 -and @(Get-RemovableMonitor -Root $uRoot -Path $uTaskPath).Count -eq 2 -and ($script:ULogs -join "`n") -match 'Set \$MonitorNameOverride')
+Check "U7 non-interactive with an unknown name refuses and removes nothing" ((Invoke-UninstallFlow -Requested 'Gamma' -Root $uRoot -Path $uTaskPath -KeepRoot $uKeep) -eq 1 -and @(Get-RemovableMonitor -Root $uRoot -Path $uTaskPath).Count -eq 2)
+Check "U7 non-interactive with a name removes that one, then the last needs no name" ((Invoke-UninstallFlow -Requested 'Alpha' -KeepHistory $false -Root $uRoot -Path $uTaskPath -KeepRoot $uKeep) -eq 0 -and @(Get-RemovableMonitor -Root $uRoot -Path $uTaskPath)[0].Name -eq 'Beta' -and (Invoke-UninstallFlow -Requested '' -Root $uRoot -Path $uTaskPath -KeepRoot $uKeep) -eq 0 -and @(Get-RemovableMonitor -Root $uRoot -Path $uTaskPath).Count -eq 0)
+$NonInteractive = $false
+Check "U7 a run with nothing installed says so and changes nothing" ((Invoke-UninstallFlow -Root $uRoot -Path $uTaskPath -KeepRoot $uKeep) -eq 0)
+
+UReset $uRoot
+$uEvilDir = Join-Path $uRoot 'evil'
+New-Item $uEvilDir -ItemType Directory -Force | Out-Null
+$uEvilName = '$(New-Item -Path C:\tmp\uninstall-pwned.txt -ItemType File -Force)`"; whoami #'
+@{ MonitorName=$uEvilName; Url='https://x.invalid/' } | ConvertTo-Json | Set-Content (Join-Path $uEvilDir 'install-settings.json') -Encoding UTF8
+Set-Content (Join-Path $uEvilDir 'Drops.log') -Value 'x' -Encoding UTF8
+$uEvil = @(Get-RemovableMonitor -Root $uRoot -Path $uTaskPath)
+$script:UOut = @()
+Show-RemovableMonitor -Items $uEvil
+$uEvilRes = Remove-MonitorInstall -Monitor @($uEvil)[0] -KeepHistory $true -KeepRoot $uKeep
+Check "U8 a hostile monitor name is printed literally and runs nothing" ((($script:UOut -join "`n") -match [regex]::Escape('New-Item -Path C:\tmp\uninstall-pwned.txt')) -and -not (Test-Path 'C:\tmp\uninstall-pwned.txt') -and $uEvilRes.FolderRemoved -and (Test-Path $uRoot))
+$uTraversal = [PSCustomObject]@{ Name='T'; Slug='..\..\Windows'; Dir=(Join-Path $uRoot 'safe'); Url=''; Kind='Monitor'; TaskName='none'; TaskPath=$uTaskPath; TaskState='no task' }
+New-Item (Join-Path $uRoot 'safe') -ItemType Directory -Force | Out-Null
+Set-Content (Join-Path $uRoot 'safe\Drops.log') -Value 'x' -Encoding UTF8
+$uTrav = Move-MonitorHistory -Monitor $uTraversal -KeepRoot $uKeep
+Check "U8 a folder name that climbs out cannot write outside the keep root" ($uTrav -and $uTrav.StartsWith($uKeep, [StringComparison]::OrdinalIgnoreCase))
+Check "U9 the first question routes to the uninstall and exits before the install root is touched" ($src -match "Install or upgrade a monitor, or remove one\? I = install or upgrade, U = uninstall" -and $src -match "if \(""\`$Action"" -eq 'Uninstall'\) \{ exit \(Invoke-UninstallFlow\) \}" -and $src.IndexOf("exit (Invoke-UninstallFlow)") -lt $src.IndexOf("Created install root"))
+Check "U9 the config block carries the action and the history toggle" ($src -match '(?m)^\$Action\s+=\s+"Install"' -and $src -match '(?m)^\$KeepHistoryOnUninstall = \$true' -and $src -match '(?m)^\$HistoryKeepRoot\s+=')
+Check "U9 the last monitor going names the telemetry task rather than removing it" ($src -match 'telemetry publisher task .* is still scheduled' -and $src -match 'Unregister-ScheduledTask -TaskPath')
+Remove-Item function:Write-Host -ErrorAction SilentlyContinue
+Remove-Item $uRoot -Recurse -Force -ErrorAction SilentlyContinue
+function Write-Log { param($Level,$Message) }
 
 
 Write-Host ""

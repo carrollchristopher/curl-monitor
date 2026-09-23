@@ -14,7 +14,7 @@ $firstFunc = ($ast.EndBlock.Statements | Where-Object { $_ -is [System.Managemen
 $assigns = $ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and $_.Extent.StartLineNumber -lt $firstFunc }
 foreach ($a in $assigns) { if ($a.Left.Extent.Text -ne '$Template_MonitorScript') { Invoke-Expression $a.Extent.Text } }
 $Template_MonitorScript = $template
-foreach ($f in $ast.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst]},$false) | Where-Object { $_.Name -in @('Write-Log','ConvertTo-SafeSiteName','ConvertTo-SecureText','Protect-Secret','Save-SmtpCredential','Remove-SmtpCredential','New-MonitorContent') }) { Invoke-Expression $f.Extent.Text }
+foreach ($f in $ast.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst]},$false) | Where-Object { $_.Name -in @('Write-Log','ConvertTo-SafeSiteName','ConvertTo-SecureText','Protect-Secret','Save-SmtpCredential','Remove-SmtpCredential','New-MonitorContent','ConvertTo-MonitorSlug','Get-InstalledMonitor','Get-LegacyInstall','Get-FolderSizeText','Get-RemovableMonitor','Show-RemovableMonitor','Select-RemovableMonitor','Stop-MonitorProcess','Move-MonitorHistory','Remove-MonitorInstall','Invoke-UninstallFlow') }) { Invoke-Expression $f.Extent.Text }
 function Write-Log { param($Level,$Message) $script:LastLog = "$Level|$Message" }
 
 $scratch = 'C:\tmp\hst_win_tests'
@@ -435,6 +435,66 @@ Check "M9 SLOW and SLOW RESOLVED emails attempted in order" ($drop9Text -match '
 Check "M9 heartbeat ends not slow" (-not (Get-Content (Join-Path $runDir9 'heartbeat.json') -Raw | ConvertFrom-Json).IsSlow)
 Check "M9 due daily summary built from the drops log and sent on the first poll" ($log9 -match 'Daily summary: \[DAILY\] WinSlow \([^)]+\) - 0 slow polls, 1 failed poll, 0 outages in 24 hours' -and $drop9Text -match '\| ALERT +\| Not sent, retrying every minute for up to 60 minutes: \[DAILY\] WinSlow')
 Check "M9 summary date recorded, so it is not sent twice" ((Get-Content (Join-Path $runDir9 'summary-sent.txt') -TotalCount 1) -eq (Get-Date).ToString('yyyy-MM-dd') -and @([regex]::Matches($log9, 'Daily summary: ')).Count -eq 1)
+
+# U: a real removal on this machine. Two monitors polling under scratch tasks, one removed, the other untouched.
+$runDirU = Join-Path $scratch 'run_uninstall'
+New-Item $runDirU -ItemType Directory | Out-Null
+$uTaskPath = '\CurlMonitorTest\'
+$portU = Get-FreeTestPort
+$Url = "http://127.0.0.1:$portU/"
+$IntervalSeconds = 1; $TimeoutSeconds = 3; $DownThreshold = 3; $MinPopulatedBytes = 50; $ExpectedContentMarker = ''
+$srvU = Start-Job -ScriptBlock {
+    param($port)
+    $l = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, $port); $l.Start()
+    $deadline = (Get-Date).AddSeconds(180); $body = ('CurlMonitor OK ' * 10)
+    while ((Get-Date) -lt $deadline) {
+        if ($l.Pending()) {
+            $c = $l.AcceptTcpClient(); $s = $c.GetStream(); $s.ReadTimeout = 300
+            $buf = New-Object byte[] 4096; try { $s.Read($buf, 0, $buf.Length) | Out-Null } catch { }
+            $resp = "HTTP/1.1 200 OK`r`nContent-Type: text/html`r`nContent-Length: $($body.Length)`r`nConnection: close`r`n`r`n$body"
+            $b = [System.Text.Encoding]::ASCII.GetBytes($resp); $s.Write($b, 0, $b.Length); $s.Flush(); $c.Close()
+        } else { Start-Sleep -Milliseconds 30 }
+    }
+    $l.Stop()
+} -ArgumentList $portU
+Start-Sleep -Seconds 2
+$uProcs = @{}
+foreach ($name in @('Keeper', 'Doomed')) {
+    $dir = Join-Path $runDirU (ConvertTo-MonitorSlug $name)
+    New-Item $dir -ItemType Directory -Force | Out-Null
+    $InstallDir = $dir
+    $MonitorName = $name
+    $gen = New-MonitorContent -SiteName 'UninstallTest' -Mail $mailDown
+    Set-Content (Join-Path $dir 'Watch-CurlMonitor.ps1') -Value $gen -Encoding UTF8
+    @{ MonitorName = $name; Url = $Url; SiteName = 'UninstallTest' } | ConvertTo-Json | Set-Content (Join-Path $dir 'install-settings.json') -Encoding UTF8
+    Set-Content (Join-Path $dir 'credential.bin') -Value 'cipher' -Encoding ASCII
+    $act = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$dir\Watch-CurlMonitor.ps1`""
+    $prin = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    Register-ScheduledTask -TaskName ($TaskNamePrefix + $name) -TaskPath $uTaskPath -Action $act -Principal $prin -Force | Out-Null
+    Start-ScheduledTask -TaskPath $uTaskPath -TaskName ($TaskNamePrefix + $name)
+    $uProcs[$name] = $dir
+}
+Start-Sleep -Seconds 25
+$keeperCsv = Get-ChildItem (Join-Path $runDirU 'Keeper') -Filter 'Latency_*.csv' | Select-Object -First 1
+$keeperBefore = if ($keeperCsv) { @(Import-Csv $keeperCsv.FullName).Count } else { 0 }
+$doomedPolling = $null -ne (Get-ChildItem (Join-Path $runDirU 'Doomed') -Filter 'Latency_*.csv' -ErrorAction SilentlyContinue)
+$uKeepRoot = Join-Path $scratch 'kept'
+$NonInteractive = $true
+$rcU = Invoke-UninstallFlow -Requested 'Doomed' -KeepHistory $true -Root $runDirU -Path $uTaskPath -KeepRoot $uKeepRoot
+$NonInteractive = $false
+Start-Sleep -Seconds 12
+$keeperAfter = if ($keeperCsv) { @(Import-Csv $keeperCsv.FullName).Count } else { 0 }
+$keeperTask = Get-ScheduledTask -TaskName ($TaskNamePrefix + 'Keeper') -TaskPath $uTaskPath -ErrorAction SilentlyContinue
+$doomedTask = Get-ScheduledTask -TaskName ($TaskNamePrefix + 'Doomed') -TaskPath $uTaskPath -ErrorAction SilentlyContinue
+$doomedProc = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine -like "*run_uninstall\Doomed*" })
+$uKeptDir = @(Get-ChildItem $uKeepRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'Doomed_*' })
+Check "U live: both monitors polled before the removal" ($keeperBefore -ge 5 -and $doomedPolling)
+Check "U live: the removed monitor's task, folder and process are gone" ($rcU -eq 0 -and $null -eq $doomedTask -and -not (Test-Path (Join-Path $runDirU 'Doomed')) -and @($doomedProc).Count -eq 0)
+Check "U live: its history was kept where the run said" (@($uKeptDir).Count -eq 1 -and @(Get-ChildItem $uKeptDir[0].FullName -Filter 'Latency_*.csv').Count -eq 1)
+Check "U live: the other monitor is untouched, still running and still recording" ($null -ne $keeperTask -and "$($keeperTask.State)" -eq 'Running' -and $keeperAfter -gt $keeperBefore -and (Test-Path (Join-Path $runDirU 'Keeper\credential.bin')))
+foreach ($t in @(Get-ScheduledTask -TaskPath $uTaskPath -ErrorAction SilentlyContinue)) { Unregister-ScheduledTask -TaskName $t.TaskName -TaskPath $uTaskPath -Confirm:$false -ErrorAction SilentlyContinue }
+Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine -like "*run_uninstall*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+$srvU | Stop-Job -ErrorAction SilentlyContinue; $srvU | Remove-Job -Force -ErrorAction SilentlyContinue
 
 # M3: no plaintext secret anywhere in any artifact
 $leak = Get-ChildItem $scratch -Recurse -File | Where-Object { (Get-Content $_.FullName -Raw -ErrorAction SilentlyContinue) -like "*s3cret-O'Brien*" }
