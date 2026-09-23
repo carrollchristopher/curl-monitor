@@ -1392,7 +1392,7 @@ function Get-ContentMarker {
     param([string]$SavedDefault = "")
     if ($NonInteractive) { return [string]$(if ($ExpectedContentMarker) { $ExpectedContentMarker } elseif ($SavedDefault) { $SavedDefault } else { '' }) }
     $default = if ($SavedDefault) { $SavedDefault } else { $ExpectedContentMarker }
-    $hint = @("Words from the page, so a login page that loads but comes back wrong still counts as down.",
+    $hint = @("Words from the page, so a page that loads but comes back wrong still counts as down.",
               "Blank accepts any page that returns HTTP 200.")
     $label = "Text"
     if ($default) {
