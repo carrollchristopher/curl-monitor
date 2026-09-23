@@ -205,7 +205,7 @@ function Get-DropLine {
 }
 
 function New-CommitSubject {
-    param([Parameter(Mandatory)][datetime]$Date, [Parameter(Mandatory)][string]$Window, [Parameter(Mandatory)][int]$Count, [Parameter(Mandatory)][double]$Availability)
+    param([Parameter(Mandatory)][datetime]$Date, [Parameter(Mandatory)][string]$Window, [Parameter(Mandatory)][double]$Availability)
     return "Feature Improvement: telemetry reporting publisher, data sampling $($Date.ToString('yyyy-MM-dd')) $($Window.ToLower()), availability $('{0:N2}' -f $Availability)%"
 }
 
@@ -398,7 +398,7 @@ function Publish-Window {
     }
 
     $overall = [math]::Round((@($measurements | ForEach-Object { [double]$_.Stats.AvailabilityPercent }) | Measure-Object -Average).Average, 2)
-    $subject = New-CommitSubject -Date $Now -Window $Window -Count $measurements.Count -Availability $overall
+    $subject = New-CommitSubject -Date $Now -Window $Window -Availability $overall
     Write-Line INFO $subject
 
     if ($DryRun) { Write-Line DONE "Dry run: files written under '$RepoPath', git untouched."; return 0 }
