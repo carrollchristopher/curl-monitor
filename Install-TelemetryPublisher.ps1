@@ -38,6 +38,8 @@ param(
     [string]$RepoPath = 'C:\ProgramData\CurlMonitor-telemetry\curl-monitor',
     [string]$MonitorRoot = 'C:\ProgramData\CurlMonitor',
     [string]$TaskPath = '\CurlMonitor\',
+    [string]$PreviousTaskPath = '\DIT\',
+    [string]$PreviousStateDir = 'C:\ProgramData\DIT\Telemetry',
     [string]$TaskName = 'Curl Monitor telemetry publisher',
     [string]$RepoUrl = '',
     [string]$AuthorName = '',
@@ -51,7 +53,31 @@ param(
 
 $TokenFileName = 'github-token.bin'
 $SettingsFileName = 'publisher-settings.json'
+$CarriedStateFiles = @($TokenFileName, $SettingsFileName, 'publish-state.json', 'endpoint-map.json', 'git-credentials')
 $Entropy = 'DIT-CurlMonitor-Telemetry-v1'
+
+function Move-PreviousState {
+    # Carries an earlier install's token, settings, publish state and endpoint map into the new state folder.
+    # Without the endpoint map the next run reassigns ENDPOINT-01 upward by first-seen order, so one endpoint can
+    # end up published under two codes and one code can hold two URLs.
+    param([Parameter(Mandatory)][string]$From, [Parameter(Mandatory)][string]$To, [Parameter(Mandatory)][string[]]$Names)
+    if (-not $From -or $From -eq $To -or -not (Test-Path -LiteralPath $From)) { return 0 }
+    $moved = 0
+    foreach ($name in $Names) {
+        $src = Join-Path $From $name
+        $dst = Join-Path $To $name
+        if (-not (Test-Path -LiteralPath $src)) { continue }
+        if (Test-Path -LiteralPath $dst) { continue }
+        try {
+            Copy-Item -LiteralPath $src -Destination $dst -Force -ErrorAction Stop
+            if ($name -in @($TokenFileName, 'git-credentials')) { Set-SecretFileAcl -Path $dst }
+            $moved++
+        }
+        catch { Write-Log -Level WARNING -Message "Could not carry '$name' over from '$From'. $($_.Exception.Message)" }
+    }
+    if ($moved) { Write-Log -Level CREATED -Message "Carried $moved file(s) from the earlier state folder '$From' into '$To'." }
+    return $moved
+}
 
 function Grant-RepoAccess {
     # The publisher runs as SYSTEM while an administrator created the working copy. Git rejects a repository whose
@@ -160,17 +186,39 @@ function Set-RepoCredential {
     $line = "https://x-access-token:$Token@$($uri.Host)"
     if (-not (Test-Path -LiteralPath $StoreFile)) { New-Item -Path $StoreFile -ItemType File -Force | Out-Null }
     Set-SecretFileAcl -Path $StoreFile
-    Set-Content -LiteralPath $StoreFile -Value $line -Encoding ASCII -Force
+    [IO.File]::WriteAllText($StoreFile, ($line + "`n"), [Text.Encoding]::ASCII)
     # A machine-wide credential manager would run first and wait on a prompt no one can answer under SYSTEM, so the
-    # helper list is cleared for this working copy and only the stored file is used.
+    # helper list is cleared for this working copy and only the stored file is used. The empty first entry clears
+    # what git inherits; PowerShell drops an empty argument, so both entries are written into the config directly.
+    # The path is given with forward slashes: a value containing a backslash and a space is run through sh by git,
+    # which strips the backslashes and writes the token to a drive-relative path inside the working copy.
+    $storeForGit = ($StoreFile -replace '\\', '/')
+
     & git.exe -C $RepoPath config --unset-all credential.helper 2>&1 | Out-Null
-    & git.exe -C $RepoPath config --add credential.helper "" | Out-Null
-    & git.exe -C $RepoPath config --add credential.helper "store --file=`"$StoreFile`"" | Out-Null
+    Add-Content -LiteralPath (Join-Path $RepoPath '.git\config') -Value "[credential]" -Encoding ASCII
+    Add-Content -LiteralPath (Join-Path $RepoPath '.git\config') -Value "`thelper = " -Encoding ASCII
+    Add-Content -LiteralPath (Join-Path $RepoPath '.git\config') -Value "`thelper = store --file='$storeForGit'" -Encoding ASCII
+    # Ask git what it would actually use, rather than trusting the file we just wrote
+    $probe = "protocol=https`nhost=$($uri.Host)`n`n"
+    $answer = ''
+    try {
+        $env:GIT_TERMINAL_PROMPT = '0'
+        $answer = ($probe | & git.exe -C $RepoPath credential fill 2>&1) -join "`n"
+    }
+    catch { $answer = "$($_.Exception.Message)" }
+    finally { Remove-Item Env:\GIT_TERMINAL_PROMPT -ErrorAction SilentlyContinue }
+    if ($answer -match '(?m)^password=.+$') {
+        Write-Log -Level CREATED -Message "git reads the token for $($uri.Host) from '$StoreFile' for this working copy only."
+    }
+    else {
+        Write-Log -Level FAILED -Message "git could not read the stored token for $($uri.Host) from '$StoreFile', so the scheduled push will fail. Helpers: $(@(& git.exe -C $RepoPath config --get-all credential.helper 2>$null) -join ' | ')"
+    }
 }
 
 function Install-PublisherTask {
     param(
         [Parameter(Mandatory)][string]$TaskPath,
+        [string]$EarlierTaskPath = '',
         [Parameter(Mandatory)][string]$TaskName,
         [Parameter(Mandatory)][string]$ScriptPath,
         [Parameter(Mandatory)][string]$RepoPath,
@@ -187,6 +235,17 @@ function Install-PublisherTask {
     )
     $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::FromHours(1))
     $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    # This task used to live under \DIT\. Register-ScheduledTask -Force only replaces the one at $TaskPath, so the
+    # old one has to go or both fire at the same times, against two working copies, into the same repository.
+    foreach ($old in @($EarlierTaskPath) | Where-Object { $_ -and $_ -ne $TaskPath }) {
+        if (Get-ScheduledTask -TaskName $TaskName -TaskPath $old -ErrorAction SilentlyContinue) {
+            try {
+                Unregister-ScheduledTask -TaskName $TaskName -TaskPath $old -Confirm:$false -ErrorAction Stop
+                Write-Log -Level INFORMATIONAL -Message "Removed the earlier publisher task '$old$TaskName'."
+            }
+            catch { Write-Log -Level WARNING -Message "'$old$TaskName' is still registered and will publish as well. Remove it by hand. $($_.Exception.Message)" }
+        }
+    }
     Register-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -Action $action -Trigger $triggers -Settings $settings -Principal $principal -Force -ErrorAction Stop | Out-Null
     return (Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction Stop)
 }
@@ -212,6 +271,7 @@ if (-not (Get-Command git.exe -ErrorAction SilentlyContinue)) {
 
 if (-not (Test-Path -LiteralPath $StateDir)) { New-Item -Path $StateDir -ItemType Directory -Force | Out-Null }
 & icacls.exe "$StateDir" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)(F)" "*S-1-5-32-544:(OI)(CI)(F)" | Out-Null
+$null = Move-PreviousState -From $PreviousStateDir -To $StateDir -Names $CarriedStateFiles
 
 $settingsPath = Join-Path $StateDir $SettingsFileName
 $saved = $null
@@ -296,7 +356,7 @@ if (-not $SkipClone) {
     ConvertTo-Json | Set-Content -LiteralPath $settingsPath -Encoding UTF8
 
 try {
-    $task = Install-PublisherTask -TaskPath $TaskPath -TaskName $TaskName -ScriptPath $PublisherPath -RepoPath $RepoPath -MonitorRoot $MonitorRoot -StateDir $StateDir -MorningTime $MorningTime -EveningTime $EveningTime
+    $task = Install-PublisherTask -TaskPath $TaskPath -EarlierTaskPath $PreviousTaskPath -TaskName $TaskName -ScriptPath $PublisherPath -RepoPath $RepoPath -MonitorRoot $MonitorRoot -StateDir $StateDir -MorningTime $MorningTime -EveningTime $EveningTime
     Write-Log -Level CREATED -Message "Registered '$TaskPath$TaskName' to run at $MorningTime and $EveningTime as SYSTEM ($($task.Triggers.Count) triggers)."
 }
 catch {

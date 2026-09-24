@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    One-shot diagnostic for the HST Monitor Graph mail path. Proves whether the app can send and, if not, exactly why.
+    One-shot diagnostic for the Curl Monitor Graph mail path. Proves whether the app can send and, if not, exactly why.
 
 .DESCRIPTION
     Run on the site server (or any machine) after the installer has run tenant setup.
@@ -38,7 +38,8 @@ $ClientSecret   = ""                       # Plaintext secret for ad hoc use. Le
 $MailFrom       = ""
 $MailTo         = ""
 
-$InstallDir          = "C:\ProgramData\CurlMonitor"
+$InstallRoot         = "C:\ProgramData\CurlMonitor"
+$MonitorName         = ""                  # Which monitor's settings to read. Blank picks the only one installed.
 $SettingsFileName    = "install-settings.json"
 $CredentialFileName  = "credential.bin"
 
@@ -84,10 +85,24 @@ function Get-RestErrorDetail {
     return "$detail"
 }
 
-Write-Log -Level STARTED -Message "HST Monitor mail diagnostic."
+Write-Log -Level STARTED -Message "Curl Monitor mail diagnostic."
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 # Prefill from the installer's saved settings
+# One folder per monitor under the root, each with its own settings and its own stored secret
+$candidates = @(Get-ChildItem -Path $InstallRoot -Directory -ErrorAction SilentlyContinue | Where-Object { Test-Path (Join-Path $_.FullName $SettingsFileName) })
+if ($MonitorName) {
+    $wantSlug = ($MonitorName -replace '[^A-Za-z0-9]+', '-').Trim('-')
+    if ($wantSlug.Length -gt 60) { $wantSlug = $wantSlug.Substring(0, 60).Trim('-') }
+    $wanted = @($candidates | Where-Object { $_.Name -eq $wantSlug -or $_.Name -eq $MonitorName })
+    if (-not $wanted.Count) { Write-Log -Level FAILED -Message "No monitor called '$MonitorName' under '$InstallRoot'. Installed: $(if ($candidates.Count) { (@($candidates | ForEach-Object { $_.Name }) -join ', ') } else { 'none' })."; exit 1 }
+    $candidates = $wanted
+}
+if (@($candidates).Count -gt 1 -and -not ($GraphTenantId -and $GraphClientId -and $ClientSecret -and $MailFrom -and $MailTo)) {
+    Write-Log -Level FAILED -Message "More than one monitor is installed under '$InstallRoot': $((@($candidates | ForEach-Object { $_.Name })) -join ', '). Set `$MonitorName at the top of this script to pick one."
+    exit 1
+}
+$InstallDir = if (@($candidates).Count -eq 1) { @($candidates)[0].FullName } else { $InstallRoot }
 $settingsPath = Join-Path $InstallDir $SettingsFileName
 if (Test-Path $settingsPath) {
     try {
@@ -148,7 +163,7 @@ Write-Host "  tid (tenant)               : $($claims.tid)"
 Write-Host "  roles (Entra permissions)  : $roles"
 Write-Host ""
 Write-Host "The oid above is what Exchange authorizes against. It must equal BOTH of these:"
-Write-Host "  1. Entra portal: Enterprise applications -> HST Monitor -> Overview -> Object ID"
+Write-Host "  1. Entra portal: Enterprise applications -> Curl Monitor -> Overview -> Object ID"
 Write-Host "  2. Exchange:     Get-ServicePrincipal | fl DisplayName,AppId,ObjectId"
 Write-Host ""
 
@@ -175,7 +190,7 @@ catch {
         Write-Host ""
         Write-Host "    Get-ServicePrincipal | fl DisplayName,AppId,ObjectId"
         Write-Host "        ObjectId must equal the token oid printed above. Mismatch = the Exchange pointer is wrong:"
-        Write-Host "        Remove-ServicePrincipal -Identity <bad>; New-ServicePrincipal -AppId $GraphClientId -ObjectId <token oid> -DisplayName 'HST Monitor'"
+        Write-Host "        Remove-ServicePrincipal -Identity <bad>; New-ServicePrincipal -AppId $GraphClientId -ObjectId <token oid> -DisplayName 'Curl Monitor'"
         Write-Host ""
         Write-Host "    Test-ServicePrincipalAuthorization -Identity <ObjectId> -Resource $MailFrom | ft"
         Write-Host "        Expect RoleName 'Application Mail.Send' with InScope True."

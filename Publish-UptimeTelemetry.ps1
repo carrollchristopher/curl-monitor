@@ -225,9 +225,12 @@ function New-TelemetryReport {
     [void]$sb.AppendLine("# Endpoint availability, $($Date.ToString('yyyy-MM-dd'))")
     [void]$sb.AppendLine()
     foreach ($window in @('Morning', 'Evening')) {
-        $set = @($Rows | Where-Object { $_.Window -eq $window } | Sort-Object Endpoint)
-        if ($set.Count -eq 0) { continue }
-        [void]$sb.AppendLine("## $window window, measured to $($set[0].WindowEnd_Local)")
+        $all = @($Rows | Where-Object { $_.Window -eq $window })
+        if ($all.Count -eq 0) { continue }
+        # Every row published for this window, oldest first per endpoint: a window published twice shows both
+        $set = @($all | Sort-Object Endpoint, WindowEnd_Local)
+        $measuredTo = @(@($all | ForEach-Object { "$($_.WindowEnd_Local)" }) | Sort-Object)[-1]
+        [void]$sb.AppendLine("## $window window, measured to $measuredTo")
         [void]$sb.AppendLine()
         [void]$sb.AppendLine('| Endpoint | Polls | Available | p50 | p95 | Max | Failed | Slow | Outages |')
         [void]$sb.AppendLine('|---|---:|---:|---:|---:|---:|---:|---:|---:|')
@@ -289,6 +292,55 @@ function Invoke-Git {
     return [PSCustomObject]@{ ExitCode = $LASTEXITCODE; Output = ($out | ForEach-Object { "$_" }) -join "`n" }
 }
 
+function New-OutputSnapshot {
+    # Copies aside only the paths this job writes, so they can be put back without touching anything else
+    param([Parameter(Mandatory)][string]$RepoPath, [Parameter(Mandatory)][string[]]$Paths)
+    $root = Join-Path ([IO.Path]::GetTempPath()) ('curlmon-publish-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -Path $root -ItemType Directory -Force | Out-Null
+    $items = New-Object System.Collections.ArrayList
+    foreach ($rel in $Paths) {
+        $live = Join-Path $RepoPath $rel
+        $existed = Test-Path -LiteralPath $live
+        [void]$items.Add([PSCustomObject]@{ Rel = $rel; Existed = $existed })
+        if (-not $existed) { continue }
+        $saved = Join-Path $root $rel
+        $parent = Split-Path -Path $saved -Parent
+        if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -Path $parent -ItemType Directory -Force | Out-Null }
+        Copy-Item -LiteralPath $live -Destination $saved -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    return [PSCustomObject]@{ Root = $root; Items = @($items); RepoPath = $RepoPath }
+}
+
+function Restore-OutputSnapshot {
+    # Puts the snapshotted paths back exactly as they were, and removes anything this run created
+    param([Parameter(Mandatory)][object]$Snapshot)
+    $ok = $true
+    foreach ($i in @($Snapshot.Items)) {
+        $live = Join-Path $Snapshot.RepoPath $i.Rel
+        try {
+            if (Test-Path -LiteralPath $live) { Remove-Item -LiteralPath $live -Recurse -Force -ErrorAction Stop }
+            if ($i.Existed) {
+                $saved = Join-Path $Snapshot.Root $i.Rel
+                $parent = Split-Path -Path $live -Parent
+                if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -Path $parent -ItemType Directory -Force | Out-Null }
+                Copy-Item -LiteralPath $saved -Destination $live -Recurse -Force -ErrorAction Stop
+            }
+        }
+        catch { $ok = $false }
+    }
+    Remove-Item -LiteralPath $Snapshot.Root -Recurse -Force -ErrorAction SilentlyContinue
+    return $ok
+}
+
+function Test-RepoMidRebase {
+    # Both rebase backends, and a conflicted autostash reapply, leave the working copy unusable for later runs
+    param([Parameter(Mandatory)][string]$RepoPath)
+    if (Test-Path -LiteralPath (Join-Path $RepoPath '.git\rebase-merge')) { return $true }
+    if (Test-Path -LiteralPath (Join-Path $RepoPath '.git\rebase-apply')) { return $true }
+    $unmerged = @(& git.exe -C $RepoPath ls-files -u 2>$null)
+    return (@($unmerged).Count -gt 0)
+}
+
 function Publish-Window {
     # One run: measure every monitor, write the files, then commit and push unless -DryRun was given
     param(
@@ -335,6 +387,10 @@ function Publish-Window {
         if (Test-Path -LiteralPath $outFile) { $outages = @(Import-Csv -LiteralPath $outFile) }
         $stats = Get-TelemetryStat -Rows $rows -Outages $outages -DropLines (Get-DropLine -Folder $folder.FullName -From $from) -From $from -To $Now -SlowThresholdMs $threshold
         $hash = ConvertTo-UrlHash -Url $url
+        if ([int]$stats.Polls -le 0) {
+            Write-Line WARN "Skipping '$($folder.Name)': no polls recorded in this window, so there is nothing to publish for it."
+            continue
+        }
         [void]$measurements.Add([PSCustomObject]@{ Code = (Get-EndpointCode -Map $map -UrlHash $hash); UrlHash = $hash; Stats = $stats })
     }
     if ($measurements.Count -eq 0) { Write-Line WARN 'No monitors with data. Nothing published.'; return 0 }
@@ -344,6 +400,10 @@ function Publish-Window {
     foreach ($k in @($map.Keys | Sort-Object { $map[$_] })) { $mapOut[$k] = $map[$k] }
     ([PSCustomObject]$mapOut) | ConvertTo-Json -Compress | Set-Content -LiteralPath $mapfile -Encoding UTF8
 
+    $outputPaths = @('data/telemetry', 'reports', 'README.md')
+    $snapshot = New-OutputSnapshot -RepoPath $RepoPath -Paths $outputPaths
+    $headBefore = "$(& git.exe -C $RepoPath rev-parse HEAD 2>$null)".Trim()
+    $stateBefore = if (Test-Path -LiteralPath $statefile) { Get-Content -LiteralPath $statefile -Raw -ErrorAction SilentlyContinue } else { $null }
     $windowEnd = $Now.ToString('yyyy-MM-dd HH:mm:ss')
     foreach ($m in $measurements) {
         $row = [PSCustomObject]@{
@@ -397,33 +457,68 @@ function Publish-Window {
         else { Write-Line WARN "README.md has no telemetry markers, so its table was left alone." }
     }
 
-    $overall = [math]::Round((@($measurements | ForEach-Object { [double]$_.Stats.AvailabilityPercent }) | Measure-Object -Average).Average, 2)
+    $totalPolls = (@($measurements | ForEach-Object { [int]$_.Stats.Polls }) | Measure-Object -Sum).Sum
+    $totalFailed = (@($measurements | ForEach-Object { [int]$_.Stats.FailedPolls }) | Measure-Object -Sum).Sum
+    $overall = if ($totalPolls -gt 0) { [math]::Round(100 * ($totalPolls - $totalFailed) / $totalPolls, 2) } else { 0 }
     $subject = New-CommitSubject -Date $Now -Window $Window -Availability $overall
     Write-Line INFO $subject
 
-    if ($DryRun) { Write-Line DONE "Dry run: files written under '$RepoPath', git untouched."; return 0 }
+    if ($DryRun) {
+        # These files were written into the real working copy, and a later run would commit them beside its own
+        # rows for the same window, so exactly what this run wrote is put back.
+        if (Restore-OutputSnapshot -Snapshot $snapshot) {
+            Write-Line DONE 'Dry run: the files it would commit were produced and then put back, git untouched.'
+        }
+        else {
+            Write-Line WARN "Dry run could not fully put the working copy back. Check 'git status' in '$RepoPath' before the next run."
+        }
+        return 0
+    }
 
     $add = Invoke-Git -RepoPath $RepoPath -Arguments @('add', '--', 'data/telemetry', 'reports', 'README.md')
-    if ($add.ExitCode -ne 0) { Write-Line FAIL "git add failed. $($add.Output)"; return 1 }
+    if ($add.ExitCode -ne 0) {
+        $null = Restore-OutputSnapshot -Snapshot $snapshot
+        Write-Line FAIL "git add failed, so nothing was published and the files were put back. $($add.Output)"
+        return 1
+    }
     if ((Invoke-Git -RepoPath $RepoPath -Arguments @('diff', '--cached', '--quiet')).ExitCode -eq 0) {
         Write-Line DONE 'Nothing changed since the last run. No commit made.'
         Set-Content -LiteralPath $statefile -Value (@{ LastWindowEnd = $windowEnd; LastWindow = $Window } | ConvertTo-Json -Compress) -Encoding UTF8
         return 0
     }
     $commit = Invoke-Git -RepoPath $RepoPath -Arguments @('commit', '-m', $subject, '-m', (New-CommitBody -Measurements $measurements))
-    if ($commit.ExitCode -ne 0) { Write-Line FAIL "git commit failed. $($commit.Output)"; return 1 }
+    if ($commit.ExitCode -ne 0) {
+        $null = Invoke-Git -RepoPath $RepoPath -Arguments @('reset', '--mixed', $headBefore)
+        $null = Restore-OutputSnapshot -Snapshot $snapshot
+        Write-Line FAIL "git commit failed, so nothing was published and the files were put back. $($commit.Output)"
+        return 1
+    }
+    # The commit records what has been measured, so the window moves on with it. A push that fails only delays
+    # delivery, while leaving the window open would measure the same polls again and publish them twice.
+    Set-Content -LiteralPath $statefile -Value (@{ LastWindowEnd = $windowEnd; LastWindow = $Window } | ConvertTo-Json -Compress) -Encoding UTF8
 
     $pushed = $false
     foreach ($attempt in 1..2) {
         $rebase = Invoke-Git -RepoPath $RepoPath -Arguments @('pull', '--rebase', '--autostash')
-        if ($rebase.ExitCode -ne 0) { Write-Line WARN "git pull --rebase failed on attempt $attempt. $($rebase.Output)" }
+        if ($rebase.ExitCode -ne 0) {
+            Write-Line WARN "git pull --rebase failed on attempt $attempt. $($rebase.Output)"
+            if (Test-RepoMidRebase -RepoPath $RepoPath) {
+                # Left in place this would break every run after this one
+                $null = Invoke-Git -RepoPath $RepoPath -Arguments @('rebase', '--abort')
+                $null = Invoke-Git -RepoPath $RepoPath -Arguments @('reset', '--mixed', $headBefore)
+                $null = Restore-OutputSnapshot -Snapshot $snapshot
+                if ($null -ne $stateBefore) { Set-Content -LiteralPath $statefile -Value $stateBefore -Encoding UTF8 -NoNewline }
+                else { Remove-Item -LiteralPath $statefile -Force -ErrorAction SilentlyContinue }
+                Write-Line FAIL 'The rebase stopped on a conflict, so this run was rolled back and the working copy put back. The next run measures the same window again.'
+                return 1
+            }
+        }
         $push = Invoke-Git -RepoPath $RepoPath -Arguments @('push')
         if ($push.ExitCode -eq 0) { $pushed = $true; break }
         Write-Line WARN "git push was rejected on attempt $attempt. Rebasing and trying once more."
     }
-    if (-not $pushed) { Write-Line FAIL 'Could not push after two attempts. The commit is waiting in the working copy.'; return 1 }
+    if (-not $pushed) { Write-Line FAIL 'Could not push after two attempts. The commit is waiting in the working copy and goes out with the next run.'; return 1 }
 
-    Set-Content -LiteralPath $statefile -Value (@{ LastWindowEnd = $windowEnd; LastWindow = $Window } | ConvertTo-Json -Compress) -Encoding UTF8
     Write-Line DONE "Published and pushed: $subject"
     return 0
 }

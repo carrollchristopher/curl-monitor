@@ -1414,7 +1414,7 @@ $lOk = Invoke-LegacyMigration -Legacy $lLegacyObj -Destination $lDest
 Check "L6 migration reports success and removes the old folder" ($lOk -and -not (Test-Path $lLegacy))
 Check "L6 history the new monitor already wrote is never overwritten" ((Get-Content (Join-Path $lDest 'Outages.csv')) -eq 'newer history that must survive' -and @(Get-ChildItem $lDest -Filter 'legacy-*Outages.csv').Count -eq 1)
 Check "L6 files in subfolders and unrecognised files are carried, not deleted" (@(Get-ChildItem $lDest -Filter '*Latency_202501.csv').Count -eq 1 -and @(Get-ChildItem $lDest -Filter 'legacy-*notes-from-the-admin.txt').Count -eq 1)
-Check "L6 the migrated credential is locked to SYSTEM and Administrators as it lands" ($src -match '(?s)Split-Path \$targetPath -Leaf\) -eq \$CredentialFileName.*?icacls\.exe .\$targetPath. /inheritance:r /grant:r')
+Check "L6 the migrated credential is locked to SYSTEM and Administrators as it lands, under whatever name it landed as" ($src -match '(?s)if \(\$target -eq \$CredentialFileName\) \{.*?icacls\.exe .\$targetPath. /inheritance:r /grant:r' -and $src -match 'Filter "\*\$CredentialFileName"')
 Check "L6 a copy that fails keeps the old folder and says so" ($src -match 'file\(s\) did not copy, so .* is left in place')
 Check "L7 migration runs after the monitor is written, just before the task is registered" ($src -match "(?s)Wrote and verified monitor script.*?if \(\`$migrate\) \{\s+if \(Invoke-LegacyMigration -Legacy \`$legacy -Destination \`$InstallDir\)" -and $src -match 'An abort before this point')
 Check "L7 the installer acts on the migration result rather than ignoring it" ($src -match 'Migration did not finish' -and -not ($src -match '\$null = Invoke-LegacyMigration'))
@@ -1538,6 +1538,14 @@ Copy-Item (Join-Path $mDir 'Latency_202609.csv') (Join-Path $mroot "site-a\Laten
 $recent = @($hdr) + @(1..40 | ForEach-Object { '"' + $now.AddMinutes(-$_).ToString('yyyy-MM-dd HH:mm:ss') + '","200","True","' + (100 + $_) + '","OK","10.0.0.1"' })
 [IO.File]::WriteAllLines((Join-Path $mroot "site-a\Latency_$($now.ToString('yyyyMM')).csv"), [string[]]$recent)
 Set-Content (Join-Path $mroot 'site-a\Watch-CurlMonitor.ps1') -Value "`$SlowThresholdMs       = 3000`nfunction x { }"
+function MoreTelemetryPolls {
+    param([Parameter(Mandatory)][string]$Folder, [int]$Count = 30)
+    $path = Join-Path $Folder ("Latency_" + (Get-Date -Format 'yyyyMM') + ".csv")
+    $stamp = Get-Date
+    $rows = @(1..$Count | ForEach-Object { '"' + $stamp.ToString('yyyy-MM-dd HH:mm:ss') + '","200","True","' + (100 + $_) + '","OK","10.0.0.1"' })
+    Add-Content -Path $path -Value $rows -Encoding UTF8
+    Start-Sleep -Seconds 2
+}
 & git.exe init --bare -q $bare
 & git.exe clone -q $bare $work 2>&1 | Out-Null
 Set-Content (Join-Path $work 'README.md') -Value "# repo`n`n$ReadmeStartMarker`n$ReadmeEndMarker`n"
@@ -1555,7 +1563,12 @@ Check "M5 it writes the data row, the dated report, and the README table" ((Test
 Check "M5 the map and state stay out of the repository" ((Test-Path (Join-Path $state 'endpoint-map.json')) -and (Test-Path (Join-Path $state 'publish-state.json')) -and -not (Test-Path (Join-Path $work 'endpoint-map.json')) -and -not ((& git.exe -C $work log -1 --name-only --pretty=format:) -match 'endpoint-map'))
 Check "M5 the committed data names no URL, and the author is the configured one" (-not ((Get-Content $dataFile -Raw) -match 'example\.com') -and (& git.exe -C $work log -1 --pretty=%an) -eq 'Test Author')
 
+# A window with nothing new in it publishes nothing at all
+$rc1b = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $pubPath -RepoPath $work -MonitorRoot $mroot -StatePath $state -Window Evening 2>&1
+Check "M6 a window with no new polls publishes nothing rather than an endpoint at 0 percent" ((($rc1b -join ' ') -match 'no polls recorded in this window|No monitors with data') -and @(Import-Csv $dataFile).Count -eq 1 -and [int](& git.exe -C $work rev-list --count HEAD) -eq $after)
+
 # A second run in the same window appends rather than duplicating the file, and the report keeps both
+MoreTelemetryPolls -Folder (Join-Path $mroot 'site-a')
 $rc2 = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $pubPath -RepoPath $work -MonitorRoot $mroot -StatePath $state -Window Evening 2>&1
 Check "M6 the same endpoint keeps its code, so a second run appends instead of starting a new folder" (@(Get-ChildItem (Join-Path $work 'data\telemetry') -Directory).Count -eq 1 -and (Get-Content (Join-Path $state 'endpoint-map.json') -Raw) -match 'ENDPOINT-01')
 Check "M6 a second window appends one row under the same header and commits again" (@(Import-Csv $dataFile).Count -eq 2 -and @(Get-Content $dataFile | Where-Object { $_ -match 'WindowEnd_Local' }).Count -eq 1 -and [int](& git.exe -C $work rev-list --count HEAD) -eq $after + 1)
@@ -1575,6 +1588,7 @@ Set-Content (Join-Path $other 'notes.md') -Value 'from elsewhere'
 & git.exe -C $other add . | Out-Null
 & git.exe -C $other -c user.name=O -c user.email=o@example.com commit -qm 'unrelated change' | Out-Null
 & git.exe -C $other push -q origin HEAD 2>&1 | Out-Null
+MoreTelemetryPolls -Folder (Join-Path $mroot 'site-a')
 $rc4 = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $pubPath -RepoPath $work -MonitorRoot $mroot -StatePath $state -Window Morning 2>&1
 Check "M8 a non-fast-forward push is rebased and lands, keeping the other commit" ((& git.exe -C $bare log --pretty=%s) -match 'Feature Improvement: telemetry reporting publisher' -and (& git.exe -C $bare log --pretty=%s) -match 'unrelated change' -and ($rc4 -join ' ') -match 'Published and pushed|telemetry: ')
 
@@ -1583,7 +1597,7 @@ $dryWork = Join-Path $tRoot 'dry'
 & git.exe clone -q $bare $dryWork 2>&1 | Out-Null
 $dryBefore = [int](& git.exe -C $dryWork rev-list --count HEAD)
 $rc5 = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $pubPath -RepoPath $dryWork -MonitorRoot $mroot -StatePath (Join-Path $tRoot 'state2') -Window Morning -DryRun 2>&1
-Check "M9 a dry run writes the files but commits nothing" ([int](& git.exe -C $dryWork rev-list --count HEAD) -eq $dryBefore -and (Test-Path (Join-Path $dryWork 'data\telemetry')) -and ($rc5 -join ' ') -match 'Dry run' -and (& git.exe -C $dryWork status --porcelain) -match 'data/telemetry')
+Check "M9 a dry run commits nothing and puts the working copy back, so a later run cannot commit its files" ([int](& git.exe -C $dryWork rev-list --count HEAD) -eq $dryBefore -and (($rc5 -join ' ') -match 'produced and then put back') -and -not ((& git.exe -C $dryWork status --porcelain) -join ''))
 
 # The publisher installer, driven into scratch paths, never reaching GitHub
 $pubInstaller = 'C:\Workspaces\HST Monitor\Install-TelemetryPublisher.ps1'
@@ -1613,9 +1627,13 @@ Remove-Item $tRoot -Recurse -Force -ErrorAction SilentlyContinue
 Section "U. Uninstall: listing, selection, removal, and the broken shapes"
 foreach ($f in $ast.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in @('Get-FolderSizeText','Get-RemovableMonitor','Show-RemovableMonitor','Select-RemovableMonitor','Stop-MonitorProcess','Move-MonitorHistory','Remove-MonitorInstall','Invoke-UninstallFlow','Get-PreviousRootMonitor','Move-MonitorToNewRoot','Invoke-RootMove','Register-MonitorTask','Protect-InstallFolder')},$false)) { Invoke-Expression $f.Extent.Text }
 $uRoot = Join-Path $InstallDir 'uninstall'
-# A real install in the old location on this machine must never leak into these listings
+# A real install in the old location on this machine must never leak into these listings, and neither can a real
+# HSTProbe folder or its task: every default this section relies on is pinned to somewhere that does not exist.
 $PreviousRoot = Join-Path $InstallDir 'no-old-location'
 $PreviousTaskPath = '\NoSuchTaskPath\'
+$LegacyInstallDir = Join-Path $InstallDir 'no-older-layout'
+$LegacyTaskName = 'No Legacy Task'
+$TelemetryTaskName = 'No Telemetry Task'
 $uKeep = Join-Path $InstallDir 'uninstall-kept'
 $uTaskPath = '\NoSuchTaskPath\'
 $script:ULogs = @()
@@ -1706,7 +1724,7 @@ $uTraversal = [PSCustomObject]@{ Name='T'; Slug='..\..\Windows'; Dir=(Join-Path 
 New-Item (Join-Path $uRoot 'safe') -ItemType Directory -Force | Out-Null
 Set-Content (Join-Path $uRoot 'safe\Drops.log') -Value 'x' -Encoding UTF8
 $uTrav = Move-MonitorHistory -Monitor $uTraversal -KeepRoot $uKeep
-Check "U8 a folder name that climbs out cannot write outside the keep root" ($uTrav -and $uTrav.StartsWith($uKeep, [StringComparison]::OrdinalIgnoreCase))
+Check "U8 a folder name that climbs out cannot write outside the keep root" ($uTrav -and [System.IO.Path]::GetFullPath($uTrav).StartsWith([System.IO.Path]::GetFullPath($uKeep), [StringComparison]::OrdinalIgnoreCase))
 Check "U9 the first question routes to the uninstall and exits before the install root is touched" ($src -match 'Write-Question -Question "Install or uninstall\?" -Hint @\("I  install' -and $src -match "if \(""\`$Action"" -eq 'Uninstall'\) \{ exit \(Invoke-UninstallFlow\) \}" -and $src.IndexOf("exit (Invoke-UninstallFlow)") -lt $src.IndexOf("Created install root"))
 Check "U9 the config block carries the action and the history toggle" ($src -match '(?m)^\$Action\s+=\s+"Install"' -and $src -match '(?m)^\$KeepHistoryOnUninstall = \$true' -and $src -match '(?m)^\$HistoryKeepRoot\s+=')
 Check "U9 the last monitor going names the telemetry task rather than removing it" ($src -match 'telemetry publisher task .* is still scheduled' -and $src -match 'Unregister-ScheduledTask -TaskPath')
@@ -1774,8 +1792,49 @@ $NonInteractive = $false
 Write-Question -Question "Monitor name" -Hint @("first line", "second line")
 Check "N7 a question prints nothing when nobody is there to answer it" (@($script:NOut).Count -eq 4 -and $script:NOut[1] -eq 'Monitor name' -and $script:NOut[2] -eq '  first line' -and $script:NOut[3] -eq '  second line')
 
+# ----- What the audit found missing, each with the behaviour it protects -----
+$nLegacyDir = Join-Path $nRoot 'legacy-probe'
+New-Item $nLegacyDir -ItemType Directory -Force | Out-Null
+@{ MonitorName = 'HST eChart'; Url = 'https://legacy.invalid/x'; SiteName = 'S' } | ConvertTo-Json | Set-Content (Join-Path $nLegacyDir 'install-settings.json') -Encoding UTF8
+$nLegacyItems = @(Get-RemovableMonitor -Root $nNew -Path $nTaskPath -LegacyDir $nLegacyDir -LegacyTask 'HST eChart Monitor' -PrevRoot (Join-Path $nRoot 'no-old') -PrevPath '\NoSuchPrevPath\')
+$nLegacyOne = @($nLegacyItems | Where-Object { $_.Kind -eq 'Legacy' })
+Check "N9 the older layout is listed with the task folder it was actually registered in" (@($nLegacyOne).Count -eq 1 -and @($nLegacyOne)[0].TaskPath -eq '\NoSuchPrevPath\' -and @($nLegacyOne)[0].Dir -eq $nLegacyDir)
+
+$nPrevLeft = Join-Path $nRoot 'prev-leftover'
+New-Item (Join-Path $nPrevLeft 'Half-Removed') -ItemType Directory -Force | Out-Null
+Set-Content (Join-Path $nPrevLeft 'Half-Removed\Drops.log') -Value 'x' -Encoding UTF8
+$nPrevItems = @(Get-RemovableMonitor -Root $nNew -Path $nTaskPath -LegacyDir (Join-Path $nRoot 'none') -LegacyTask 'No Legacy Task' -PrevRoot $nPrevLeft -PrevPath '\NoSuchPrevPath\')
+Check "N9 a folder a failed removal left in the old location is listed too" (@($nPrevItems | Where-Object { $_.Kind -eq 'Leftover' -and $_.Name -eq 'Half-Removed (old location)' }).Count -eq 1)
+
+$nBoundaryLiteral = @'
+Escape($Dir.TrimEnd('\') + '\')
+'@.Trim()
+Check "N9 the process match is anchored at the folder boundary, so a sibling is not killed" ($src.Contains($nBoundaryLiteral))
+Check "N9 the telemetry publisher is looked for at both task folders when the last monitor goes" ($src -match '\$telemetryPath = @\(\$Path, \$PrevPath\)')
+Check "N9 the destination is printed in both relocation questions" ($src -match 'Write-Question -Question "Move to \$\{NewRoot\}\?"' -and $src -match 'into \$\{InstallRoot\}\?"')
+Check "N9 a blank text check states the size floor it really applies" ($src -match 'Blank accepts any page that returns HTTP 200 and is at least \$MinPopulatedBytes bytes')
+
+# A monitor left in the old location must be visible to the name prompt, or the same name installs a second copy
+$script:NOut = @()
+$script:NLogs = @()
+$nAway = @([PSCustomObject]@{ Name = 'GitHub Monitor'; Slug = 'GitHub-Monitor'; Dir = (Join-Path $nOld 'GitHub-Monitor'); Url = 'https://old.invalid/gh'; TaskName = 'Curl Monitor - GitHub Monitor'; TaskPath = '\NoSuchPrevPath\'; HasTask = $true })
+$NonInteractive = $true
+$MonitorNameOverride = ''
+$MonitorName = 'GitHub Monitor'
+$nRefused = Get-MonitorName -SavedDefault '' -Existing @() -Elsewhere $nAway
+$NonInteractive = $false
+$MonitorName = ''
+Check "N10 a non-interactive run refuses a name that is still installed somewhere else" ($nRefused -eq '' -and (($script:NLogs -join "`n") -match 'two monitors on the same URL'))
+$script:NOut = @()
+UAnswers @('GitHub Monitor', 'N', 'Something Else')
+$nTyped = Get-MonitorName -SavedDefault '' -Existing @() -Elsewhere $nAway
+Check "N10 typing that name interactively offers to move it, and N asks for another name" ($nTyped -eq 'Something Else' -and (($script:NOut -join "`n") -match 'Move it here first\?') -and (($script:NOut -join "`n") -match 'still in '))
+
+# What the move itself leaves: the task it registered, at the new path, under the name it was given
+$nLeftTask = Get-ScheduledTask -TaskName 'Curl Monitor - HST eChart' -TaskPath $nTaskPath -ErrorAction SilentlyContinue
+Check "N8 the move registered the monitor's task at the new path, or said plainly that it could not" (($null -ne $nLeftTask -and "$($nLeftTask.Actions[0].Arguments)" -like "*$nDest*") -or (($script:NLogs -join "`n") -match 'could not register its task|rather than running'))
 NDropTask -Name 'Curl Monitor - HST eChart'
-Check "N8 the move leaves no test task behind" (@(Get-ScheduledTask -TaskPath $nTaskPath -ErrorAction SilentlyContinue).Count -eq 0)
+Check "N8 this section leaves none of its own tasks behind" ($null -eq (Get-ScheduledTask -TaskName 'Curl Monitor - HST eChart' -TaskPath $nTaskPath -ErrorAction SilentlyContinue))
 Remove-Item function:Write-Host -ErrorAction SilentlyContinue
 function Write-Log { param($Level,$Message) }
 Remove-Item $nRoot -Recurse -Force -ErrorAction SilentlyContinue

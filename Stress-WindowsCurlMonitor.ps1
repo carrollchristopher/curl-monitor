@@ -14,7 +14,7 @@ $firstFunc = ($ast.EndBlock.Statements | Where-Object { $_ -is [System.Managemen
 $assigns = $ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and $_.Extent.StartLineNumber -lt $firstFunc }
 foreach ($a in $assigns) { if ($a.Left.Extent.Text -ne '$Template_MonitorScript') { Invoke-Expression $a.Extent.Text } }
 $Template_MonitorScript = $template
-foreach ($f in $ast.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst]},$false) | Where-Object { $_.Name -in @('Write-Log','ConvertTo-SafeSiteName','ConvertTo-SecureText','Protect-Secret','Save-SmtpCredential','Remove-SmtpCredential','New-MonitorContent','ConvertTo-MonitorSlug','Get-InstalledMonitor','Get-LegacyInstall','Get-FolderSizeText','Get-RemovableMonitor','Show-RemovableMonitor','Select-RemovableMonitor','Stop-MonitorProcess','Move-MonitorHistory','Remove-MonitorInstall','Invoke-UninstallFlow','Get-PreviousRootMonitor') }) { Invoke-Expression $f.Extent.Text }
+foreach ($f in $ast.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst]},$false) | Where-Object { $_.Name -in @('Write-Log','ConvertTo-SafeSiteName','ConvertTo-SecureText','Protect-Secret','Save-SmtpCredential','Remove-SmtpCredential','New-MonitorContent','ConvertTo-MonitorSlug','Get-InstalledMonitor','Get-LegacyInstall','Get-FolderSizeText','Get-RemovableMonitor','Show-RemovableMonitor','Select-RemovableMonitor','Stop-MonitorProcess','Move-MonitorHistory','Remove-MonitorInstall','Invoke-UninstallFlow','Get-PreviousRootMonitor','Move-MonitorToNewRoot','Invoke-RootMove','Register-MonitorTask','Protect-InstallFolder') }) { Invoke-Expression $f.Extent.Text }
 function Write-Log { param($Level,$Message) $script:LastLog = "$Level|$Message" }
 
 $scratch = 'C:\tmp\hst_win_tests'
@@ -468,9 +468,7 @@ foreach ($name in @('Keeper', 'Doomed')) {
     Set-Content (Join-Path $dir 'Watch-CurlMonitor.ps1') -Value $gen -Encoding UTF8
     @{ MonitorName = $name; Url = $Url; SiteName = 'UninstallTest' } | ConvertTo-Json | Set-Content (Join-Path $dir 'install-settings.json') -Encoding UTF8
     Set-Content (Join-Path $dir 'credential.bin') -Value 'cipher' -Encoding ASCII
-    $act = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$dir\Watch-CurlMonitor.ps1`""
-    $prin = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-    Register-ScheduledTask -TaskName ($TaskNamePrefix + $name) -TaskPath $uTaskPath -Action $act -Principal $prin -Force | Out-Null
+    Register-MonitorTask -Name ($TaskNamePrefix + $name) -Path $uTaskPath -ScriptPath (Join-Path $dir 'Watch-CurlMonitor.ps1')
     Start-ScheduledTask -TaskPath $uTaskPath -TaskName ($TaskNamePrefix + $name)
     $uProcs[$name] = $dir
 }
@@ -495,6 +493,84 @@ Check "U live: the other monitor is untouched, still running and still recording
 foreach ($t in @(Get-ScheduledTask -TaskPath $uTaskPath -ErrorAction SilentlyContinue)) { Unregister-ScheduledTask -TaskName $t.TaskName -TaskPath $uTaskPath -Confirm:$false -ErrorAction SilentlyContinue }
 Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine -like "*run_uninstall*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 $srvU | Stop-Job -ErrorAction SilentlyContinue; $srvU | Remove-Job -Force -ErrorAction SilentlyContinue
+
+# ----- R: the move out of the old install root, with a real task and a live monitor -----
+$rOldRoot = Join-Path $scratch 'run_move_old'
+$rNewRoot = Join-Path $scratch 'run_move_new'
+New-Item $rOldRoot -ItemType Directory -Force | Out-Null
+New-Item $rNewRoot -ItemType Directory -Force | Out-Null
+$portR = Get-FreeTestPort
+$srvR = Start-Job -ScriptBlock {
+    param($port)
+    $l = New-Object System.Net.HttpListener
+    $l.Prefixes.Add("http://127.0.0.1:$port/")
+    $l.Start()
+    while ($l.IsListening) {
+        $ctx = $l.GetContext()
+        $body = [Text.Encoding]::UTF8.GetBytes(('<html>move drill ' + ('x' * 2000) + '</html>'))
+        $ctx.Response.StatusCode = 200
+        $ctx.Response.OutputStream.Write($body, 0, $body.Length)
+        $ctx.Response.Close()
+    }
+} -ArgumentList $portR
+Start-Sleep -Seconds 2
+$rUrl = "http://127.0.0.1:$portR/"
+$rName = 'Move Drill'
+$rSlug = ConvertTo-MonitorSlug $rName
+$rDir = Join-Path $rOldRoot $rSlug
+New-Item $rDir -ItemType Directory -Force | Out-Null
+$InstallDir = $rDir
+$MonitorName = $rName
+$Url = $rUrl
+$rGen = New-MonitorContent -SiteName 'MoveSite' -Mail $mailDown
+Set-Content (Join-Path $rDir 'Watch-CurlMonitor.ps1') -Value $rGen -Encoding UTF8
+@{ MonitorName = $rName; Url = $rUrl; SiteName = 'MoveSite' } | ConvertTo-Json | Set-Content (Join-Path $rDir 'install-settings.json') -Encoding UTF8
+Set-Content (Join-Path $rDir 'credential.bin') -Value 'cipher' -Encoding ASCII
+Register-MonitorTask -Name ($TaskNamePrefix + $rName) -Path $uTaskPath -ScriptPath (Join-Path $rDir 'Watch-CurlMonitor.ps1')
+Start-ScheduledTask -TaskPath $uTaskPath -TaskName ($TaskNamePrefix + $rName)
+Start-Sleep -Seconds 20
+$rCsvBefore = @(Get-ChildItem $rDir -Filter 'Latency_*.csv' -ErrorAction SilentlyContinue)
+$rRowsBefore = if ($rCsvBefore.Count) { @(Import-Csv $rCsvBefore[0].FullName).Count } else { 0 }
+Check "R live: the monitor polls from the old location before the move" ($rRowsBefore -ge 3 -and $null -ne (Get-ScheduledTask -TaskName ($TaskNamePrefix + $rName) -TaskPath $uTaskPath -ErrorAction SilentlyContinue))
+
+$rFound = @(Get-PreviousRootMonitor -Root $rOldRoot -Path $uTaskPath -NewRoot $rNewRoot)
+$rMoved = Move-MonitorToNewRoot -Monitor @($rFound)[0] -NewRoot $rNewRoot -NewTaskPath $uTaskPath
+$rDest = Join-Path $rNewRoot $rSlug
+Start-Sleep -Seconds 20
+$rOldTask = Get-ScheduledTask -TaskName ($TaskNamePrefix + $rName) -TaskPath $uTaskPath -ErrorAction SilentlyContinue
+$rAction = if ($rOldTask) { "$($rOldTask.Actions[0].Arguments)" } else { '' }
+$rCsvAfter = @(Get-ChildItem $rDest -Filter 'Latency_*.csv' -ErrorAction SilentlyContinue)
+$rRowsAfter = if ($rCsvAfter.Count) { @(Import-Csv $rCsvAfter[0].FullName).Count } else { 0 }
+$rText = if (Test-Path (Join-Path $rDest 'Watch-CurlMonitor.ps1')) { Get-Content (Join-Path $rDest 'Watch-CurlMonitor.ps1') -Raw } else { '' }
+$rHb = if (Test-Path (Join-Path $rDest 'heartbeat.json')) { Get-Content (Join-Path $rDest 'heartbeat.json') -Raw | ConvertFrom-Json } else { $null }
+$rProc = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine -like "*run_move_new*" })
+Check "R live: the move reported success and the folder is at the new root, with its history and secret" ($rMoved -and (Test-Path $rDest) -and -not (Test-Path $rDir) -and (Test-Path (Join-Path $rDest 'credential.bin')) -and $rRowsAfter -ge $rRowsBefore)
+Check "R live: the task now runs the monitor from the new folder" ($null -ne $rOldTask -and $rAction -like "*$rDest*" -and $rAction -notlike "*$rDir\*")
+Check "R live: the moved monitor is polling again at the new location" ($rRowsAfter -gt $rRowsBefore -and @($rProc).Count -ge 1)
+Check "R live: its script was repointed and carries no reference to the old folder" (($rText -match [regex]::Escape($rDest)) -and -not ($rText -match [regex]::Escape($rDir)) -and $null -ne [ScriptBlock]::Create($rText))
+Check "R live: the deliberate stop was recorded, so no restart notice is raised" ($null -ne $rHb -and -not ($rHb.Stopped -eq $true -and $rRowsAfter -eq $rRowsBefore))
+$rDrops = if (Test-Path (Join-Path $rDest 'Drops.log')) { Get-Content (Join-Path $rDest 'Drops.log') -Raw } else { '' }
+Check "R live: the move raised no RESTART line in the drops log" (-not ($rDrops -match '\| RESTART'))
+
+# Removing one monitor must not touch a monitor whose folder name merely starts with the same text
+$rSibling = Join-Path $rNewRoot ($rSlug + '-Reports')
+New-Item $rSibling -ItemType Directory -Force | Out-Null
+$InstallDir = $rSibling
+$MonitorName = "$rName Reports"
+Set-Content (Join-Path $rSibling 'Watch-CurlMonitor.ps1') -Value (New-MonitorContent -SiteName 'MoveSite' -Mail $mailDown) -Encoding UTF8
+@{ MonitorName = "$rName Reports"; Url = $rUrl; SiteName = 'MoveSite' } | ConvertTo-Json | Set-Content (Join-Path $rSibling 'install-settings.json') -Encoding UTF8
+Register-MonitorTask -Name ($TaskNamePrefix + "$rName Reports") -Path $uTaskPath -ScriptPath (Join-Path $rSibling 'Watch-CurlMonitor.ps1')
+Start-ScheduledTask -TaskPath $uTaskPath -TaskName ($TaskNamePrefix + "$rName Reports")
+Start-Sleep -Seconds 15
+$rSibBefore = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine -like "*$rSibling*" })
+$null = Stop-MonitorProcess -Dir $rDest
+Start-Sleep -Seconds 3
+$rSibAfter = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine -like "*$rSibling*" })
+Check "R live: stopping one monitor leaves a sibling whose folder name starts the same alone" (@($rSibBefore).Count -ge 1 -and @($rSibAfter).Count -eq @($rSibBefore).Count)
+
+foreach ($t in @(Get-ScheduledTask -TaskPath $uTaskPath -ErrorAction SilentlyContinue)) { Unregister-ScheduledTask -TaskName $t.TaskName -TaskPath $uTaskPath -Confirm:$false -ErrorAction SilentlyContinue }
+Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and ($_.CommandLine -like "*run_move_new*" -or $_.CommandLine -like "*run_move_old*") } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+$srvR | Stop-Job -ErrorAction SilentlyContinue; $srvR | Remove-Job -Force -ErrorAction SilentlyContinue
 
 # M3: no plaintext secret anywhere in any artifact
 $leak = Get-ChildItem $scratch -Recurse -File | Where-Object { (Get-Content $_.FullName -Raw -ErrorAction SilentlyContinue) -like "*s3cret-O'Brien*" }

@@ -22,8 +22,8 @@ Alert subjects read `[DOWN] GitHub Monitor at Main Office (SERVER01) - unreachab
 Run `Install-CurlMonitor.ps1` from an elevated Windows PowerShell 5.1 console on the site server. It asks whether you are installing or uninstalling, then:
 
 1. **Monitor name**, for example `GitHub Monitor`. It names the folder, the scheduled task, and every alert.
-2. **URL** to watch, http or https.
-3. **Site name**, which appears in every alert subject beside the monitor name.
+2. **Site name**, which appears in every alert subject beside the monitor name.
+3. **URL** to watch, http or https.
 4. **Text the page must contain**, so a page that loads but comes back wrong still counts as down. Blank accepts any page that returns HTTP 200.
 5. **Mail settings**, through the wizard.
 
@@ -59,7 +59,7 @@ It asks separately about the measurement history, defaulting to keeping it. Kept
 
 An older `HSTProbe` install and anything a part-finished removal left behind are listed for removal too. When the last monitor goes and the telemetry publisher is still scheduled, the run names the command to remove that task rather than removing it silently.
 
-For an RMM, set `$Action = "Uninstall"` with `$MonitorNameOverride` and `$KeepHistoryOnUninstall` in the config block. Several monitors installed and no name given refuses and removes nothing.
+For an RMM, set `$NonInteractive = $true` and `$Action = "Uninstall"` with `$MonitorNameOverride` and `$KeepHistoryOnUninstall` in the config block. An interactive run always asks the first question, whatever `$Action` says. Several monitors installed and no name given refuses and removes nothing.
 
 ## Checking a server
 

@@ -52,6 +52,7 @@ param(
     [string]$InstallDir = '',
     [string]$TaskPath = '\CurlMonitor\',
     [string]$PreviousRoot = 'C:\ProgramData\DIT\CurlMonitor',
+    [string]$PreviousTaskPath = '\DIT\',
     [string]$TaskName = '',
     [int]$DrillCleanupMinutes = 10
 )
@@ -394,7 +395,10 @@ function Invoke-OutageDrill {
         return
     }
     Write-Check PASS "DOWN declared $([int]($downAt - $blockedAt).TotalSeconds) s after the simulated outage started, after $fails failed poll(s)."
-    if (-not $expectMail) { Write-Check WARN "Email alerts are turned off in this monitor, so no DOWN email was sent." }
+    if (-not $expectMail) {
+        if ("$($Config.MailMethod)" -eq 'None') { Write-Check INFO "This monitor was installed without alerts, so no DOWN email was expected." }
+        else { Write-Check WARN "Email alerts are turned off in this monitor, so no DOWN email was sent." }
+    }
     elseif ($downAlert -match '\| (Sent|Delivered on retry): ') { Write-Check PASS "DOWN alert email sent." }
     elseif ($downAlert) { Write-Check FAIL "The DOWN alert email was not sent. The monitor retries every minute for an hour. $($downAlert -replace '^.*?\| ALERT +\| ', '')" }
     else { Write-Check FAIL "No DOWN alert outcome was recorded within $alertWait s of DOWN." }
@@ -441,7 +445,7 @@ function Invoke-MonitorCheck {
     foreach ($k in @('IntervalSeconds', 'TimeoutSeconds', 'DownThreshold', 'SlowThresholdMs', 'MaxRedirects', 'MinPopulatedBytes')) { if ($null -eq $cfg[$k]) { $cfg[$k] = @{ IntervalSeconds = 10; TimeoutSeconds = 15; DownThreshold = 3; SlowThresholdMs = 3000; MaxRedirects = 5; MinPopulatedBytes = 1000 }[$k] } }
     $staleAfter = [int]$cfg.IntervalSeconds + [int]$cfg.TimeoutSeconds + 30
     $busyAfter = $staleAfter + 600
-    Write-Check INFO "Monitor '$($cfg.MonitorName)' at site '$($cfg.SiteName)' polls $($cfg.Url) every $($cfg.IntervalSeconds) s with a $($cfg.TimeoutSeconds) s timeout, declares DOWN after $($cfg.DownThreshold) failures in a row, and alerts by $($cfg.MailMethod) to $(@($cfg.MailTo) -join ', ')."
+    Write-Check INFO "Monitor '$($cfg.MonitorName)' at site '$($cfg.SiteName)' polls $($cfg.Url) every $($cfg.IntervalSeconds) s with a $($cfg.TimeoutSeconds) s timeout, declares DOWN after $($cfg.DownThreshold) failures in a row, and $(if ("$($cfg.MailMethod)" -eq 'None') { 'sends no alerts' } else { "alerts by $($cfg.MailMethod) to $(@($cfg.MailTo) -join ', ')" })."
     if ($null -eq $cfg.SlowWindowMinutes) { Write-Check WARN "This monitor was installed before slow alerts and daily summaries existed. Re-run Install-CurlMonitor.ps1 to add them." }
     else {
         $slowRule = if ($cfg.AlertOnSlow) { "SLOW email when $($cfg.SlowAlertPercent)% of polls in $($cfg.SlowWindowMinutes) min are slower than $($cfg.SlowThresholdMs) ms or fail" } else { 'slow alerts off' }
@@ -637,7 +641,7 @@ function Invoke-MonitorCheck {
 
     Write-Section "Endpoint from this server right now"
     $probe = Invoke-EndpointProbe -Config $cfg
-    if ($probe.Ok) { Write-Check PASS "Reached the sign-in page: HTTP 200 after $($probe.Redirects) redirect(s) in $($probe.TotalMs) ms, $($probe.Size) bytes, from $($probe.Ip)." }
+    if ($probe.Ok) { Write-Check PASS "Reached the page: HTTP 200 after $($probe.Redirects) redirect(s) in $($probe.TotalMs) ms, $($probe.Size) bytes, from $($probe.Ip)." }
     else {
         $why = if ($probe.Exit -ne 0) { "curl exit $($probe.Exit)" } elseif ($probe.Code -ne '200') { "HTTP $($probe.Code)" } else { "page not populated ($($probe.Size) bytes, marker $(if ($probe.Marker) { 'found' } else { 'missing' }))" }
         Write-Check WARN "This probe failed: $why. One failure does not alert. The monitor declares DOWN after $($cfg.DownThreshold) in a row."
@@ -676,27 +680,64 @@ function Get-MonitorFolder {
 }
 
 $folders = @()
+$allFolders = @()
+# Monitors still in the old location are reported whatever else this run finds: they keep polling from there, and
+# a server part way through the move would otherwise read as healthy.
+$leftBehind = @()
+if (-not $InstallDir) {
+    $leftBehind = @(Get-MonitorFolder -Root $PreviousRoot)
+    if ($leftBehind.Count) {
+        Write-Check FAIL "$($leftBehind.Count) monitor(s) are still installed in the old location '$PreviousRoot': $((@($leftBehind | ForEach-Object { $_.Name })) -join ', '). Run Install-CurlMonitor.ps1 and let it move them, or check one where it stands with -InstallDir '<folder>' -TaskPath '$PreviousTaskPath'."
+    }
+}
 if ($InstallDir) { $folders = @([PSCustomObject]@{ Name = (Split-Path $InstallDir -Leaf); Slug = (Split-Path $InstallDir -Leaf); Path = $InstallDir }) }
 else {
     $folders = @(Get-MonitorFolder -Root $InstallRoot)
+    $allFolders = $folders
     if ($Monitor) {
         $wanted = @($folders | Where-Object { $_.Name -eq $Monitor -or $_.Slug -eq $Monitor })
         if (-not $wanted.Count) {
-            Write-Check FAIL "No monitor called '$Monitor' under '$InstallRoot'. Installed: $(if ($folders.Count) { (@($folders | ForEach-Object { $_.Name }) -join ', ') } else { 'none' })."
+            $away = @($leftBehind | Where-Object { $_.Name -eq $Monitor -or $_.Slug -eq $Monitor })
+            if ($away.Count) {
+                Write-Check FAIL "'$Monitor' is installed in the old location '$($away[0].Path)'. Run Install-CurlMonitor.ps1 and let it move it, or check it where it stands with -InstallDir '$($away[0].Path)' -TaskPath '$PreviousTaskPath'."
+            }
+            else {
+                Write-Check FAIL "No monitor called '$Monitor' under '$InstallRoot'. Installed: $(if ($folders.Count) { (@($folders | ForEach-Object { $_.Name }) -join ', ') } else { 'none' })."
+            }
             exit 1
         }
         $folders = $wanted
     }
 }
+if (-not $InstallDir) {
+    $known = @(@($allFolders) + @($leftBehind) | ForEach-Object { $_.Slug })
+    foreach ($dir in @(Get-ChildItem -Path $InstallRoot -Directory -ErrorAction SilentlyContinue)) {
+        if ($known -contains $dir.Name) { continue }
+        if (Test-Path (Join-Path $dir.FullName 'install-settings.json')) {
+            Write-Check FAIL "'$($dir.FullName)' holds a monitor's settings but no Watch-CurlMonitor.ps1. That install is broken: re-run the installer for it, or remove it with the installer's uninstall option."
+        }
+    }
+    foreach ($t in @(Get-ScheduledTask -TaskPath $TaskPath -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -and $_.TaskName.StartsWith('Curl Monitor - ', [StringComparison]::OrdinalIgnoreCase) })) {
+        $named = $t.TaskName.Substring('Curl Monitor - '.Length)
+        $taskArgs = "$($t.Actions[0].Arguments)"
+        $owns = @($allFolders | Where-Object { $_.Name -eq $named -or $_.Slug -eq $named -or $taskArgs -like "*$($_.Path)\*" })
+        if (@($owns).Count -eq 0) {
+            Write-Check FAIL "Task '$TaskPath$($t.TaskName)' is registered but no monitor folder under '$InstallRoot' answers to '$named'. It is running a script that is not there."
+        }
+    }
+    # A task can be left behind at the old task path too, still launching a script that has moved
+    if ($PreviousTaskPath -and $PreviousTaskPath -ne $TaskPath) {
+        foreach ($t in @(Get-ScheduledTask -TaskPath $PreviousTaskPath -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -and $_.TaskName.StartsWith('Curl Monitor - ', [StringComparison]::OrdinalIgnoreCase) })) {
+            $taskArgs = "$($t.Actions[0].Arguments)"
+            $runsFromOld = @($leftBehind | Where-Object { $taskArgs -like "*$($_.Path)\*" })
+            if (@($runsFromOld).Count -eq 0) {
+                Write-Check FAIL "Task '$PreviousTaskPath$($t.TaskName)' is still registered at the old task path and the folder it runs is not there. Remove it with the installer's uninstall option."
+            }
+        }
+    }
+}
 if (-not $folders.Count) {
-    # A server set up before the parent folder was dropped still has its monitors one level deeper
-    $older = @(Get-MonitorFolder -Root $PreviousRoot)
-    if ($older.Count) {
-        Write-Check FAIL "No monitor under '$InstallRoot', but $($older.Count) is installed in the old location '$PreviousRoot': $((@($older | ForEach-Object { $_.Name })) -join ', '). Run Install-CurlMonitor.ps1 and let it move them, or check that one with -InstallDir."
-    }
-    else {
-        Write-Check FAIL "No monitor found under '$InstallRoot'. Run Install-CurlMonitor.ps1 on this server first."
-    }
+    if (-not $leftBehind.Count) { Write-Check FAIL "No monitor found under '$InstallRoot'. Run Install-CurlMonitor.ps1 on this server first." }
     exit 1
 }
 if ($OutageDrill -and $folders.Count -gt 1) {

@@ -31,8 +31,11 @@
 [CmdletBinding()]
 param(
     [string]$InstallerPath = (Join-Path $PSScriptRoot 'Install-CurlMonitor.ps1'),
+    [string]$MonitorName = 'Local Test Monitor',
+    [string]$Url = 'https://github.com',
+    [string]$ContentMarker = '',
     [string]$SiteName = 'LocalTest',
-    [Parameter(Mandatory)][string]$Sender,
+    [Parameter(Mandatory)][string]$SenderAddress,
     [Parameter(Mandatory)][string]$Recipient,
     [Parameter(Mandatory)][string]$TenantId,
     [Parameter(Mandatory)][string]$ClientId,
@@ -44,9 +47,34 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$InstallDir = 'C:\ProgramData\CurlMonitor'
-$TaskName = 'HST eChart Monitor'
+$InstallRoot = 'C:\ProgramData\CurlMonitor'
+# One monitor's own folder, never the shared root: everything here, including the cleanup, works on this folder
+# The folder and task are derived the way the installer derives them, including its 60 character slug limit
+$clean = ((($MonitorName -replace '[^A-Za-z0-9 _-]', '').Trim()) -replace '\s+', ' ')
+$slug = ($clean -replace '[^A-Za-z0-9]+', '-').Trim('-')
+if ($slug.Length -gt 60) { $slug = $slug.Substring(0, 60).Trim('-') }
+$InstallDir = Join-Path $InstallRoot $slug
+$TaskName = "Curl Monitor - $clean"
 $TaskPath = '\CurlMonitor\'
+if (-not $slug -or $InstallDir -eq $InstallRoot -or -not $InstallDir.StartsWith($InstallRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    Write-Host "Refusing to run: '$MonitorName' does not resolve to a folder inside '$InstallRoot'." -ForegroundColor Red
+    exit 1
+}
+if ($clean -ne $MonitorName.Trim()) {
+    Write-Host "Refusing to run: the installer would clean '$MonitorName' to '$clean' and ask an extra question these answers do not cover. Pass a -MonitorName it takes verbatim." -ForegroundColor Red
+    exit 1
+}
+# The installer asks about an older layout before it asks for the monitor name, and these answers do not cover it
+foreach ($old in @('C:\ProgramData\DIT\CurlMonitor', 'C:\ProgramData\DIT\HSTProbe')) {
+    if (Test-Path -LiteralPath $old) {
+        Write-Host "Refusing to run: '$old' still exists, so the installer asks about moving it before the questions these answers answer. Move or remove it first." -ForegroundColor Red
+        exit 1
+    }
+}
+if (Get-ScheduledTask -TaskPath '\DIT\' -ErrorAction SilentlyContinue) {
+    Write-Host "Refusing to run: tasks still exist under '\DIT\', so the installer asks about them first. Move or remove them before running this." -ForegroundColor Red
+    exit 1
+}
 $script:pass = 0; $script:fail = 0; $script:failed = @()
 $R = [ordered]@{ Started = (Get-Date).ToString('o'); Checks = @() }
 
@@ -126,7 +154,8 @@ function Invoke-DrivenInstall([string[]]$Answers, [string]$LogName, [int]$Timeou
 }
 
 function Get-MonitorProcesses {
-    @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" | Where-Object { $_.CommandLine -match 'Watch-HSTeChartUptime\.ps1' } | ForEach-Object {
+    $mine = [regex]::Escape((Join-Path $InstallDir 'Watch-CurlMonitor.ps1'))
+    @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" | Where-Object { $_.CommandLine -match $mine } | ForEach-Object {
         $own = Invoke-CimMethod -InputObject $_ -MethodName GetOwner
         [PSCustomObject]@{ Pid = $_.ProcessId; Owner = "$($own.Domain)\$($own.User)" }
     })
@@ -135,17 +164,18 @@ function Get-MonitorProcesses {
 function Get-Task { Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction SilentlyContinue }
 
 try {
-    $answers1 = @($SiteName, '1', $Sender, $Recipient, 'Y', $TenantId, $ClientId, $plainSecret, $SecretExpires, 'Y')
-    $answers2 = @('', '', '', '', '', '', '', $plainSecret, '', 'Y')
+    $answers1 = @('I', $MonitorName, $SiteName, $Url, $ContentMarker, '1', $SenderAddress, $Recipient, 'Y', $TenantId, $ClientId, $plainSecret, $SecretExpires, 'Y')
+    # Run 2 is Enter through every prompt: the saved settings answer them, and Enter keeps the stored secret
+    $answers2 = @('I', $MonitorName, '', '', '', '', '', '', '', '', '', '', '', 'Y')
 
     Write-Host ""
     Write-Host "Run 1: fresh install"
     $run1 = Invoke-DrivenInstall -Answers $answers1 -LogName 'install-run1.log'
     $R.Run1 = @{ ExitCode = $run1.ExitCode; TimedOut = $run1.TimedOut; Seconds = $run1.Seconds }
     Check "Run 1 exit code 0" ($run1.ExitCode -eq 0 -and -not $run1.TimedOut) "exit $($run1.ExitCode) timedOut=$($run1.TimedOut)"
-    Check "Run 1 reports install complete with no FAILED lines" ($run1.Text -match 'Install complete for site' -and -not ($run1.Text -match 'FAILED \|'))
+    Check "Run 1 reports install complete with no FAILED lines" ($run1.Text -match 'Install complete:' -and -not ($run1.Text -match 'FAILED \|'))
     Check "Run 1 test email accepted by Graph" ($run1.Text -match 'The mail host accepted the test message')
-    Check "Run 1 preflight reached the sign-in page through 2 redirects" ($run1.Text -match 'reached the sign-in page.*HTTP 200 after 2 redirect')
+    Check "Run 1 preflight reached the URL" ($run1.Text -match 'Preflight probe reached .*HTTP 200 after \d+ redirect')
 
     $t = Get-Task
     Check "Task exists" ($null -ne $t)
@@ -167,7 +197,7 @@ try {
     Check "Settings file present with InstalledAt and no secret" ((Test-Path $settingsPath) -and ((Get-Content $settingsPath -Raw) -match '"InstalledAt"') -and -not ((Get-Content $settingsPath -Raw).Contains($plainSecret)))
     if (Test-Path $settingsPath) {
         $s = Get-Content $settingsPath -Raw | ConvertFrom-Json
-        Check "Settings hold the wizard answers" ($s.SiteName -eq $SiteName -and $s.MailMethod -eq 'Graph' -and $s.MailFrom -eq $Sender -and @($s.MailTo) -contains $Recipient -and $s.GraphTenantId -eq $TenantId -and $s.GraphClientId -eq $ClientId)
+        Check "Settings hold the wizard answers" ($s.SiteName -eq $SiteName -and $s.MailMethod -eq 'Graph' -and $s.MailFrom -eq $SenderAddress -and @($s.MailTo) -contains $Recipient -and $s.GraphTenantId -eq $TenantId -and $s.GraphClientId -eq $ClientId)
     }
     Check "Credential file present" (Test-Path $credPath)
     if (Test-Path $credPath) {
@@ -195,8 +225,8 @@ try {
         $rowsBefore = $rows.Count
         Check "Latency CSV has the full schema" (($rows[0].PSObject.Properties.Name -join ',') -eq 'Timestamp_Local,Timestamp_UTC,SiteName,Url,HttpCode,CurlExit,Reason,DnsMs,ConnectMs,TlsMs,TtfbMs,TotalMs,SizeBytes,RemoteIp,Redirects,RedirectMs,FinalUrl,ContentOk')
         Check "Latency CSV has at least 3 polls" ($rows.Count -ge 3) "$($rows.Count) rows"
-        $bad = @($rows | Where-Object { $_.HttpCode -ne '200' -or $_.CurlExit -ne '0' -or $_.ContentOk -ne 'True' -or $_.Redirects -ne '2' -or $_.FinalUrl -notmatch 'HSTFederationProvider' })
-        Check "Every poll: 200, curl exit 0, populated, 2 redirects to the sign-in page" ($bad.Count -eq 0) "$($bad.Count) bad of $($rows.Count)"
+        $bad = @($rows | Where-Object { $_.HttpCode -ne '200' -or $_.CurlExit -ne '0' -or $_.ContentOk -ne 'True' -or $_.Url -ne $Url })
+        Check "Every poll: 200, curl exit 0, populated, and against the URL given" ($bad.Count -eq 0) "$($bad.Count) bad of $($rows.Count)"
         Check "Every poll carries timings and the backend IP" (@($rows | Where-Object { $_.TotalMs -notmatch '^\d+$' -or $_.RemoteIp -notmatch '\d' }).Count -eq 0)
         $R.SampleRow = $rows[-1]
     }
@@ -217,7 +247,7 @@ try {
     $R.Run2 = @{ ExitCode = $run2.ExitCode; TimedOut = $run2.TimedOut; Seconds = $run2.Seconds }
     Check "Run 2 exit code 0" ($run2.ExitCode -eq 0 -and -not $run2.TimedOut) "exit $($run2.ExitCode)"
     Check "Run 2 loaded saved settings and stopped the old monitor" ($run2.Text -match 'Loaded settings from a previous install' -and $run2.Text -match 'Stopped the existing monitor')
-    Check "Run 2 reports install complete with no FAILED lines" ($run2.Text -match 'Install complete for site' -and -not ($run2.Text -match 'FAILED \|'))
+    Check "Run 2 reports install complete with no FAILED lines" ($run2.Text -match 'Install complete:' -and -not ($run2.Text -match 'FAILED \|'))
     Start-Sleep -Seconds 15
     $t2 = Get-Task
     Check "Task running again after re-install" ($t2 -and [string]$t2.State -eq 'Running') "state $($t2.State)"
@@ -241,8 +271,12 @@ finally {
         if (Test-Path $InstallDir) {
             $art = Join-Path $OutDir 'artifacts'
             New-Item $art -ItemType Directory -Force | Out-Null
-            Get-ChildItem $InstallDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'credential.bin' } | Copy-Item -Destination $art -Force -ErrorAction SilentlyContinue
+            Get-ChildItem $InstallDir -File -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'credential.bin' } | Copy-Item -Destination $art -Force -ErrorAction SilentlyContinue
             Remove-Item $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        # Other monitors live under the same root, so it goes only when this run left it empty
+        if ((Test-Path $InstallRoot) -and @(Get-ChildItem -LiteralPath $InstallRoot -Force -ErrorAction SilentlyContinue).Count -eq 0) {
+            Remove-Item $InstallRoot -Force -ErrorAction SilentlyContinue
         }
         Check "Cleanup removed the task and the install folder" ($null -eq (Get-Task) -and -not (Test-Path $InstallDir))
     }

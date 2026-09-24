@@ -412,7 +412,7 @@ function Protect-StoredSecret {
     # Re-applies the SYSTEM and Administrators only lock to every stored secret under the root. Folder hardening
     # runs on every install, so without this a second monitor would leave the first one's secret readable by Users.
     param([Parameter(Mandatory)][string]$Root)
-    foreach ($file in @(Get-ChildItem -Path $Root -Filter $CredentialFileName -Recurse -File -Force -ErrorAction SilentlyContinue)) {
+    foreach ($file in @(Get-ChildItem -Path $Root -Filter "*$CredentialFileName" -Recurse -File -Force -ErrorAction SilentlyContinue)) {
         & icacls.exe "$($file.FullName)" /inheritance:r /grant:r "*S-1-5-18:(F)" "*S-1-5-32-544:(F)" | Out-Null
         if ($LASTEXITCODE -ne 0) { Write-Log -Level WARNING -Message "Could not re-lock '$($file.FullName)' (icacls exit $LASTEXITCODE). Check its permissions by hand." }
     }
@@ -1100,6 +1100,8 @@ function Get-MailConfiguration {
                     # Persist immediately: if this run is abandoned before install completes, the next run
                     # prefills Y with these IDs instead of re-creating and minting another secret
                     Save-InstallSettings -Settings @{
+                        MonitorName = $MonitorName
+                        ContentMarker = $ExpectedContentMarker
                         SiteName = $SiteName
                         MailMethod = 'Graph'
                         SmtpServer = 'graph.microsoft.com'
@@ -1180,16 +1182,29 @@ function Get-MailConfiguration {
                 $ssl    = ((Read-Choice -Prompt "Use TLS (STARTTLS)?" -Allowed @('Y','N') -Default $(if ($mem.ContainsKey('Ssl')) { if ($mem.Ssl) { 'Y' } else { 'N' } } else { 'Y' })) -eq 'Y')
                 $user   = Read-Setting -Prompt "Username" -Default $(if ($mem.User) { $mem.User } else { $from })
                 if ($NonInteractive) { Write-Log -Level FAILED -Message "Authenticated SMTP cannot be configured non-interactively because the password must be entered at the console."; return $null }
-                $cred   = Get-Credential -UserName $user -Message "Password for $user (stored encrypted, machine-scope, readable by SYSTEM on this server only)"
-                if (-not $cred -or $cred.Password.Length -eq 0) {
+                # A re-run on this server can keep the password already stored for this same user, so Enter is enough
+                $storedPassword = if ($Saved -and $Saved.MailMethod -eq 'Authenticated' -and $Saved.CredentialFor -eq $user) { Get-StoredSecret } else { $null }
+                if ($storedPassword) {
+                    Write-Question -Question "Password for $user" -Hint "Enter keeps the password already stored on this server. Type a new one to replace it."
+                    if ((Read-Choice -Prompt "Keep the stored password" -Allowed @('Y','N') -Default 'Y') -eq 'Y') {
+                        $cipher = Protect-Secret -PlainText $storedPassword
+                        $cred = New-Object System.Management.Automation.PSCredential($user, (ConvertTo-SecureText -Text $storedPassword))
+                        Write-Log -Level FOUND -Message "Keeping the SMTP password stored on this server."
+                        $storedPassword = $null
+                    }
+                }
+                if (-not $cipher) { $cred = Get-Credential -UserName $user -Message "Password for $user (stored encrypted, machine-scope, readable by SYSTEM on this server only)" }
+                if (-not $cipher -and (-not $cred -or $cred.Password.Length -eq 0)) {
                     Write-Log -Level WARNING -Message $(if ($cred) { "A password is required." } else { "No credential entered." })
                     $defMethod = $method; $defFrom = $from; $defTo = ($to -join ',')
                     $remembered[$method] = @{ Server = $server; Port = $port; Ssl = $ssl; User = $user }
                     $restart = $true
                     break
                 }
-                $user   = $cred.UserName
-                $cipher = Protect-Secret -Password $cred.Password
+                if ($cred) {
+                    $user   = $cred.UserName
+                    $cipher = Protect-Secret -Password $cred.Password
+                }
             }
         }
 
@@ -1282,23 +1297,36 @@ function Get-InstalledMonitor {
 }
 
 function Get-MonitorName {
-    # Returns the monitor name from the override, the only existing monitor, a legacy install, or a prompt
-    param([string]$SavedDefault = "", [object[]]$Existing = @())
+    # Returns the monitor name from the override, the only existing monitor, a legacy install, or a prompt.
+    # $Elsewhere holds monitors installed somewhere this run is not writing to, such as ones left in the old
+    # location when the move was declined. Reusing one of those names would leave two monitors on the same URL.
+    param([string]$SavedDefault = "", [object[]]$Existing = @(), [object[]]$Elsewhere = @())
     if (-not [string]::IsNullOrWhiteSpace($MonitorNameOverride)) {
         $clean = ConvertTo-SafeSiteName $MonitorNameOverride
         if ($clean -and ($TaskNamePrefix + $clean).Length -gt $MaxTaskNameLength) {
             Write-Log -Level FAILED -Message "Monitor name override '$clean' is too long for a task name."
             return ""
         }
+        if ($clean -and @(@($Elsewhere) | Where-Object { $_.Name -eq $clean -or ($_.Slug -and $_.Slug -eq (ConvertTo-MonitorSlug $clean)) }).Count -gt 0 -and @(@($Existing) | Where-Object { $_.Name -eq $clean -or $_.Slug -eq (ConvertTo-MonitorSlug $clean) }).Count -eq 0) {
+            Write-Log -Level FAILED -Message "'$clean' is still installed outside '$InstallRoot' and could not be moved. Installing it here as well would leave two monitors on the same URL. Nothing was installed."
+            return ""
+        }
         if ($clean) { Write-Log -Level FOUND -Message "Monitor name set from override: '$clean'."; return $clean }
     }
     $default = $SavedDefault
     if (-not $default) { $default = ConvertTo-SafeSiteName $MonitorName }
-    if (-not $default -and @($Existing).Count -eq 1) { $default = @($Existing)[0].Name }
-    if (-not $default -and @($Existing).Count -gt 1) { $default = @(@($Existing) | Sort-Object { (Get-Item $_.Path).LastWriteTime } -Descending)[0].Name }
     if ($NonInteractive) {
         $clean = ConvertTo-SafeSiteName $default
         if (-not $clean) { Write-Log -Level FAILED -Message "No monitor name. Set `$MonitorNameOverride or `$MonitorName in the config block."; return "" }
+        $awaySilent = @(@($Elsewhere) | Where-Object { $_.Name -eq $clean -or ($_.Slug -and $_.Slug -eq (ConvertTo-MonitorSlug $clean)) })
+        $hereSilent = @(@($Existing) | Where-Object { $_.Name -eq $clean -or $_.Slug -eq (ConvertTo-MonitorSlug $clean) })
+        if (@($awaySilent).Count -gt 0 -and @($hereSilent).Count -eq 0) {
+            Write-Log -Level FAILED -Message "'$clean' is still installed outside '$InstallRoot' and could not be moved. Installing it here as well would leave two monitors on the same URL. Nothing was installed."
+            return ""
+        }
+        if (@($awaySilent).Count -gt 0) {
+            Write-Log -Level WARNING -Message "'$clean' is installed here and a copy is still at '$(@($awaySilent)[0].Dir)'. This run upgrades the one here; remove the other with the uninstall option or it keeps polling the same URL."
+        }
         if (($TaskNamePrefix + $clean).Length -gt $MaxTaskNameLength) { Write-Log -Level FAILED -Message "Monitor name '$clean' is too long for a task name."; return "" }
         $clash = Get-SlugClash -Name $clean -Existing $Existing
         if ($clash) {
@@ -1308,10 +1336,14 @@ function Get-MonitorName {
         Write-Log -Level FOUND -Message "Monitor name set to '$clean' (non-interactive)."
         return $clean
     }
-    if (@($Existing).Count -gt 0) {
+    # Only ever a prompt default: a silent run has to be told which monitor it is installing
+    if (-not $default -and @($Existing).Count -eq 1) { $default = @($Existing)[0].Name }
+    if (-not $default -and @($Existing).Count -gt 1) { $default = @(@($Existing) | Sort-Object { (Get-Item $_.Path).LastWriteTime } -Descending)[0].Name }
+    if (@($Existing).Count -gt 0 -or @($Elsewhere).Count -gt 0) {
         Write-Host ""
-        Write-Host "Already installed here"
+        Write-Host "Already installed on this server"
         foreach ($m in @($Existing)) { Write-Host ("  {0}  {1}" -f $m.Name, $(if ($m.Url) { $m.Url } else { 'URL not recorded' })) }
+        foreach ($m in @($Elsewhere)) { Write-Host ("  {0}  {1}  (still in {2})" -f $m.Name, $(if ($m.Url) { $m.Url } else { 'URL not recorded' }), (Split-Path $m.Dir -Parent)) }
     }
     $hint = @("Names its folder, its task, and every alert subject. For example: GitHub Monitor")
     if (@($Existing).Count -gt 0) { $hint += "One of the names above upgrades that monitor. A new name adds another beside it." }
@@ -1327,6 +1359,29 @@ function Get-MonitorName {
         }
         # Two names can clean to one folder ('HST eChart' and 'HST_eChart', or a case-only change). Adopting the
         # installed name upgrades that monitor; anything else would overwrite its files while leaving its task behind.
+        # A monitor still installed somewhere else would keep polling beside the new one
+        $slugWanted = ConvertTo-MonitorSlug $clean
+        $away = @(@($Elsewhere) | Where-Object { $_.Name -eq $clean -or ($_.Slug -and $_.Slug -eq $slugWanted) })
+        $here = @(@($Existing) | Where-Object { $_.Name -eq $clean -or $_.Slug -eq $slugWanted })
+        if (@($away).Count -gt 0 -and @($here).Count -gt 0) {
+            # The folder here is already taken, so the other copy cannot move onto it. Upgrade this one and say so.
+            Write-Log -Level WARNING -Message "'$clean' is installed here and a copy is still at '$(@($away)[0].Dir)'. This run upgrades the one here. Remove the other with the uninstall option or it keeps polling the same URL."
+        }
+        elseif (@($away).Count -gt 0) {
+            $one = @($away)[0]
+            $taskNote = if ($one.HasTask) { "its task '$($one.TaskPath)$($one.TaskName)' is still polling" } else { "it has no task of its own" }
+            Write-Log -Level WARNING -Message "'$($one.Name)' is still installed at '$($one.Dir)' and $taskNote. Installing under this name as well would leave two monitors on the same URL."
+            Write-Question -Question "Move it here first?" -Hint @(
+                "M  move '$($one.Name)' into $InstallRoot and upgrade it in this run",
+                "N  type a different name for the new monitor"
+            )
+            if ((Read-Choice -Prompt "Choose" -Allowed @('M','N') -Default 'M') -ne 'M') { continue }
+            if (-not (Move-MonitorToNewRoot -Monitor $one)) {
+                Write-Log -Level WARNING -Message "'$($one.Name)' could not be moved, so it is still where it was. Give this run a different name, or fix the move and run again."
+                continue
+            }
+            return $one.Name
+        }
         $clash = Get-SlugClash -Name $clean -Existing $Existing
         if ($clash) {
             Write-Log -Level WARNING -Message "'$clean' uses the same folder as the installed monitor '$($clash.Name)' ($($clash.Path))."
@@ -1393,7 +1448,7 @@ function Get-ContentMarker {
     if ($NonInteractive) { return [string]$(if ($ExpectedContentMarker) { $ExpectedContentMarker } elseif ($SavedDefault) { $SavedDefault } else { '' }) }
     $default = if ($SavedDefault) { $SavedDefault } else { $ExpectedContentMarker }
     $hint = @("Words from the page, so a page that loads but comes back wrong still counts as down.",
-              "Blank accepts any page that returns HTTP 200.")
+              "Blank accepts any page that returns HTTP 200 and is at least $MinPopulatedBytes bytes.")
     $label = "Text"
     if ($default) {
         $hint += "Enter keeps '$default'. A single - drops the check."
@@ -1475,7 +1530,7 @@ function Invoke-LegacyMigration {
             # -Force on Get-Item so a hidden file, which Test-Path skips, still verifies
             $landed = Get-Item -LiteralPath $targetPath -Force -ErrorAction SilentlyContinue
             if (-not $landed -or $landed.Length -ne $file.Length) { throw "copy is not the same size" }
-            if ((Split-Path $targetPath -Leaf) -eq $CredentialFileName) {
+            if ($target -eq $CredentialFileName) {
                 # The stored secret arrives with inherited permissions, so lock it before any prompt can abort the run
                 & icacls.exe "$targetPath" /inheritance:r /grant:r "*S-1-5-18:(F)" "*S-1-5-32-544:(F)" | Out-Null
                 if ($LASTEXITCODE -ne 0) { throw "icacls could not restrict the carried credential file (exit $LASTEXITCODE)" }
@@ -1550,6 +1605,10 @@ function Move-MonitorToNewRoot {
         return $false
     }
     $oldScript = Join-Path $Monitor.Dir $MonitorFileName
+    if (-not (Test-Path -LiteralPath $oldScript)) {
+        Write-Log -Level WARNING -Message "'$($Monitor.Dir)' holds no '$MonitorFileName', so '$($Monitor.Name)' is an older layout this move does not understand. It stays where it is: run the installer again and answer Y when it offers to move the older install."
+        return $false
+    }
     $hadTask = $false
     if ($Monitor.HasTask -and (Get-ScheduledTask -TaskName $Monitor.TaskName -TaskPath $Monitor.TaskPath -ErrorAction SilentlyContinue)) {
         $hadTask = $true
@@ -1605,12 +1664,22 @@ function Move-MonitorToNewRoot {
     try {
         Register-MonitorTask -Name $Monitor.TaskName -Path $NewTaskPath -ScriptPath $script
         Start-ScheduledTask -TaskName $Monitor.TaskName -TaskPath $NewTaskPath -ErrorAction SilentlyContinue
-        Write-Log -Level CREATED -Message "Moved '$($Monitor.Name)' to '$dest', now running from '$NewTaskPath$($Monitor.TaskName)'."
+        $state = 'Unknown'
+        for ($i = 0; $i -lt 10; $i++) {
+            Start-Sleep -Seconds 1
+            $state = "$((Get-ScheduledTask -TaskName $Monitor.TaskName -TaskPath $NewTaskPath -ErrorAction SilentlyContinue).State)"
+            if ($state -eq 'Running') { break }
+        }
+        if ($state -eq 'Running') {
+            Write-Log -Level CREATED -Message "Moved '$($Monitor.Name)' to '$dest', now running from '$NewTaskPath$($Monitor.TaskName)'."
+            return $true
+        }
+        Write-Log -Level FAILED -Message "Moved '$($Monitor.Name)' to '$dest' and registered '$NewTaskPath$($Monitor.TaskName)', but it is '$state' rather than running. It starts at the next boot; start it now with Start-ScheduledTask, or let this run reinstall it."
         return $true
     }
     catch {
         Write-Log -Level FAILED -Message "Moved '$($Monitor.Name)' to '$dest' but could not register its task. Re-run the installer and give it the same name. $($_.Exception.Message)"
-        return $false
+        return $true
     }
 }
 
@@ -1623,7 +1692,7 @@ function Invoke-RootMove {
     Write-Host "Found in the old location $OldRoot"
     foreach ($m in $list) { Write-Host ("  {0}  {1}" -f $m.Name, $(if ($m.Url) { $m.Url } else { 'URL not recorded' })) }
     if (-not $NonInteractive) {
-        Write-Question -Question "Move to $NewRoot?" -Hint @(
+        Write-Question -Question "Move to ${NewRoot}?" -Hint @(
             "Each one keeps its history and its settings and starts again from the new folder.",
             "N leaves them running where they are."
         )
@@ -1674,6 +1743,11 @@ function Get-RemovableMonitor {
     foreach ($m in @(Get-InstalledMonitor -Root $Root)) {
         $taskName = $Prefix + $m.Name
         $task = Get-ScheduledTask -TaskName $taskName -TaskPath $Path -ErrorAction SilentlyContinue
+        if (-not $task) {
+            # The settings file may not name the monitor, so fall back to the task that runs out of this folder
+            $owned = @(Get-ScheduledTask -TaskPath $Path -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -and $_.TaskName.StartsWith($Prefix, [StringComparison]::OrdinalIgnoreCase) -and "$($_.Actions[0].Arguments)" -like "*$($m.Path)\*" })
+            if (@($owned).Count -eq 1) { $task = @($owned)[0]; $taskName = @($owned)[0].TaskName }
+        }
         $seen += $taskName
         [void]$items.Add([PSCustomObject]@{
             Name = $m.Name; Slug = $m.Slug; Dir = $m.Path; Url = $m.Url; Kind = 'Monitor'
@@ -1702,17 +1776,39 @@ function Get-RemovableMonitor {
         })
     }
     foreach ($m in @(Get-PreviousRootMonitor -Root $PrevRoot -Path $PrevPath -Prefix $Prefix -NewRoot $Root)) {
+        $seen += $m.TaskName
         [void]$items.Add([PSCustomObject]@{
             Name = "$($m.Name) (old location)"; Slug = $m.Slug; Dir = $m.Dir; Url = $m.Url; Kind = 'OldLocation'
             TaskName = $m.TaskName; TaskPath = $m.TaskPath; TaskState = $(if ($m.HasTask) { "$((Get-ScheduledTask -TaskName $m.TaskName -TaskPath $m.TaskPath -ErrorAction SilentlyContinue).State)" } else { 'no task' })
         })
     }
+    if ($PrevRoot -and $PrevRoot -ne $Root) {
+        $seenPrevDirs = @(@($items) | Where-Object { $_.TaskPath -eq $PrevPath } | ForEach-Object { $_.Dir })
+        foreach ($dir in @(Get-ChildItem -Path $PrevRoot -Directory -Force -ErrorAction SilentlyContinue)) {
+            if ($seenPrevDirs -contains $dir.FullName) { continue }
+            $taskName = $Prefix + $dir.Name
+            $task = Get-ScheduledTask -TaskName $taskName -TaskPath $PrevPath -ErrorAction SilentlyContinue
+            $seen += $taskName
+            [void]$items.Add([PSCustomObject]@{
+                Name = "$($dir.Name) (old location)"; Slug = $dir.Name; Dir = $dir.FullName; Url = ''; Kind = 'Leftover'
+                TaskName = $taskName; TaskPath = $PrevPath; TaskState = $(if ($task) { "$($task.State)" } else { 'no task' })
+            })
+        }
+        foreach ($task in @(Get-ScheduledTask -TaskPath $PrevPath -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -and $_.TaskName.StartsWith($Prefix, [StringComparison]::OrdinalIgnoreCase) })) {
+            if (@(@($items) | Where-Object { $_.TaskPath -eq $PrevPath -and $_.TaskName -eq $task.TaskName }).Count) { continue }
+            $name = $task.TaskName.Substring($Prefix.Length)
+            [void]$items.Add([PSCustomObject]@{
+                Name = "$name (old location)"; Slug = (ConvertTo-MonitorSlug $name); Dir = (Join-Path $PrevRoot (ConvertTo-MonitorSlug $name)); Url = ''; Kind = 'TaskOnly'
+                TaskName = $task.TaskName; TaskPath = $PrevPath; TaskState = "$($task.State)"
+            })
+        }
+    }
     $legacy = Get-LegacyInstall -Dir $LegacyDir -TaskName $LegacyTask -Path $PrevPath
     if ($legacy) {
-        $lt = Get-ScheduledTask -TaskName $LegacyTask -TaskPath $Path -ErrorAction SilentlyContinue
+        $lt = Get-ScheduledTask -TaskName $LegacyTask -TaskPath $legacy.TaskPath -ErrorAction SilentlyContinue
         [void]$items.Add([PSCustomObject]@{
             Name = "$LegacyName (older layout)"; Slug = ''; Dir = $legacy.Dir; Url = $legacy.Url; Kind = 'Legacy'
-            TaskName = $LegacyTask; TaskPath = $Path; TaskState = $(if ($lt) { "$($lt.State)" } else { 'no task' })
+            TaskName = $LegacyTask; TaskPath = $legacy.TaskPath; TaskState = $(if ($lt) { "$($lt.State)" } else { 'no task' })
         })
     }
     return @($items)
@@ -1754,7 +1850,7 @@ function Select-RemovableMonitor {
 function Stop-MonitorProcess {
     # A monitor process outliving its task keeps the folder locked, so it is stopped by the path it runs from
     param([Parameter(Mandatory)][string]$Dir)
-    $pattern = "*" + [Management.Automation.WildcardPattern]::Escape($Dir) + "*"
+    $pattern = "*" + [Management.Automation.WildcardPattern]::Escape($Dir.TrimEnd('\') + '\') + "*"
     $found = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine -like $pattern })
     $stopped = 0
     foreach ($p in $found) {
@@ -1771,18 +1867,21 @@ function Stop-MonitorProcess {
 
 function Move-MonitorHistory {
     # Moves the measurement history out of the folder before the rest goes. Returns the destination, or $null.
-    param([Parameter(Mandatory)]$Monitor, [string]$KeepRoot = $HistoryKeepRoot)
+    param([Parameter(Mandatory)]$Monitor, [string]$KeepRoot = $HistoryKeepRoot, [System.Collections.ArrayList]$Problems = $null)
     if (-not (Test-Path -LiteralPath $Monitor.Dir)) { return $null }
     $files = @(Get-ChildItem -LiteralPath $Monitor.Dir -File -Force -ErrorAction SilentlyContinue | Where-Object {
         $_.Name -like 'Latency_*.csv' -or $_.Name -like 'Outages*.csv' -or $_.Name -like 'Drops*.log' -or $_.Name -like 'HST-eChart-*'
     })
     if (@($files).Count -eq 0) { return $null }
     $slug = if ($Monitor.Slug) { $Monitor.Slug } else { ConvertTo-MonitorSlug $Monitor.Name }
-    if (-not $slug) { $slug = 'monitor' }
+    # A hand-edited settings file can name a folder that climbs out of the root, so only the leaf is ever used
+    $slug = Split-Path -Path $slug -Leaf
+    if (-not $slug -or $slug -eq '..' -or $slug -eq '.' -or $slug -match '[\\/:]') { $slug = 'monitor' }
     $dest = Join-Path $KeepRoot ("{0}_{1}" -f $slug, (Get-Date -Format 'yyyyMMdd_HHmmss'))
     try { if (-not (Test-Path -LiteralPath $dest)) { New-Item -Path $dest -ItemType Directory -Force -ErrorAction Stop | Out-Null } }
     catch {
-        Write-Log -Level WARNING -Message "Could not create '$dest' for the kept history. $($_.Exception.Message) The history stays with the folder and goes with it."
+        Write-Log -Level WARNING -Message "Could not create '$dest' for the kept history. $($_.Exception.Message)"
+        if ($null -ne $Problems) { [void]$Problems.Add("the history could not be kept in '$dest': $($_.Exception.Message)") }
         return $null
     }
     $moved = 0
@@ -1790,7 +1889,10 @@ function Move-MonitorHistory {
         $target = Join-Path $dest $f.Name
         if (Test-Path -LiteralPath $target) { $target = Join-Path $dest ("{0}_{1}{2}" -f $f.BaseName, (Get-Date -Format 'HHmmssfff'), $f.Extension) }
         try { Move-Item -LiteralPath $f.FullName -Destination $target -Force -ErrorAction Stop; $moved++ }
-        catch { Write-Log -Level WARNING -Message "Could not keep '$($f.Name)'. $($_.Exception.Message)" }
+        catch {
+            Write-Log -Level WARNING -Message "Could not keep '$($f.Name)'. $($_.Exception.Message)"
+            if ($null -ne $Problems) { [void]$Problems.Add("'$($f.Name)' could not be kept: $($_.Exception.Message)") }
+        }
     }
     if ($moved -eq 0) {
         Remove-Item -LiteralPath $dest -Recurse -Force -ErrorAction SilentlyContinue
@@ -1827,7 +1929,7 @@ function Remove-MonitorInstall {
     }
     if (Test-Path -LiteralPath $Monitor.Dir) { $null = Stop-MonitorProcess -Dir $Monitor.Dir }
     $historyPath = $null
-    if ($KeepHistory) { $historyPath = Move-MonitorHistory -Monitor $Monitor -KeepRoot $KeepRoot }
+    if ($KeepHistory) { $historyPath = Move-MonitorHistory -Monitor $Monitor -KeepRoot $KeepRoot -Problems $problems }
     $folderRemoved = $false
     if (Test-Path -LiteralPath $Monitor.Dir) {
         try { Remove-Item -LiteralPath $Monitor.Dir -Recurse -Force -ErrorAction Stop; $folderRemoved = $true }
@@ -1932,9 +2034,9 @@ function Invoke-UninstallFlow {
     Write-Host "  Left here   : $(if (@($left).Count) { (@($left) | ForEach-Object { $_.Name }) -join ', ' } else { 'nothing' })"
     Write-Host ""
     if (@($left).Count -eq 0) {
-        $telemetry = Get-ScheduledTask -TaskName $TelemetryTaskName -TaskPath $Path -ErrorAction SilentlyContinue
-        if ($telemetry) {
-            Write-Log -Level WARNING -Message "The telemetry publisher task '$Path$TelemetryTaskName' is still scheduled and has nothing left to publish. Remove it with: Unregister-ScheduledTask -TaskPath '$Path' -TaskName '$TelemetryTaskName' -Confirm:`$false"
+        $telemetryPath = @($Path, $PrevPath) | Where-Object { $_ } | Where-Object { Get-ScheduledTask -TaskName $TelemetryTaskName -TaskPath $_ -ErrorAction SilentlyContinue } | Select-Object -First 1
+        if ($telemetryPath) {
+            Write-Log -Level WARNING -Message "The telemetry publisher task '$telemetryPath$TelemetryTaskName' is still scheduled and has nothing left to publish. Remove it with: Unregister-ScheduledTask -TaskPath '$telemetryPath' -TaskName '$TelemetryTaskName' -Confirm:`$false"
         }
     }
     if (@($result.Problems).Count) {
@@ -2411,6 +2513,10 @@ function Update-MonitorState {
         OutageStartUtcStr   = $State.OutageStartUtcStr
         AlertDelivered      = $State.AlertDelivered
     }
+    # A clock that went backwards leaves these in the future, which would write a negative outage duration and
+    # hold off the reminders. Update-SlowState clamps the same way.
+    if ($s.OutageStartUtc -and $s.OutageStartUtc -gt $NowUtc) { $s.OutageStartUtc = $NowUtc }
+    if ($s.LastAlertUtc -and $s.LastAlertUtc -gt $NowUtc) { $s.LastAlertUtc = $NowUtc }
     $emailSubject = $null; $emailBody = $null; $outageRecord = $null; $transitionLog = $null; $emailKind = $null
     $deliveryNote = if ($s.AlertDelivered) { 'Delivered' } else { 'Not delivered. This server had no working mail path earlier in the outage, so this is the first notice.' }
     $reason = if ($Result.PSObject.Properties['Reason']) { $Result.Reason } else { '' }
@@ -2726,7 +2832,12 @@ function Send-AlertOrQueue {
     }
     if (Send-AlertEmail -Subject $Subject -Body $Body) { Write-DropLog -Kind 'ALERT' -Message "Sent: $Subject"; return $true }
     $now = (Get-Date).ToUniversalTime()
-    while ($script:PendingAlerts.Count -ge 5) { $script:PendingAlerts.RemoveAt(0) }
+    while ($script:PendingAlerts.Count -ge 5) {
+        $dropped = $script:PendingAlerts[0]
+        Write-Log -Level WARNING -Message "Dropping undelivered '$($dropped.Subject)': the retry queue is full."
+        Write-DropLog -Kind 'ALERT' -Message "Dropped undelivered, retry queue full: $($dropped.Subject)"
+        $script:PendingAlerts.RemoveAt(0)
+    }
     [void]$script:PendingAlerts.Add(@{ Subject = $Subject; Body = $Body; Kind = $Kind; FirstUtc = $now; LastUtc = $now })
     Write-Log -Level WARNING -Message "'$Subject' will be retried every minute for up to 60 minutes."
     Write-DropLog -Kind 'ALERT' -Message "Not sent, retrying every minute for up to 60 minutes: $Subject"
@@ -2738,6 +2849,9 @@ function Send-PendingAlert {
     $delivered = @()
     $now = (Get-Date).ToUniversalTime()
     foreach ($item in @($script:PendingAlerts)) {
+        # A clock that went backwards leaves these in the future, which would freeze the retries and the give-up
+        if ($item.FirstUtc -gt $now) { $item.FirstUtc = $now }
+        if ($item.LastUtc -gt $now) { $item.LastUtc = $now }
         if (($now - $item.LastUtc).TotalSeconds -lt 60) { continue }
         $item.LastUtc = $now
         if (Send-AlertEmail -Subject $item.Subject -Body $item.Body) {
@@ -2871,7 +2985,7 @@ function Get-RestartNotice {
     # Pure. Compares the previous heartbeat with now. Returns $null when there was no previous heartbeat, else an object
     # with Subject and Body (both $null when the gap is under the threshold), RestoredState (an outage to carry over, or
     # $null), and GapSeconds. A clock that went backwards reads as a gap of zero.
-    param([object]$Previous, [Parameter(Mandatory)][datetime]$NowUtc, [datetime]$BootTimeUtc = [datetime]::MinValue, [Parameter(Mandatory)][int]$GapThresholdSeconds, [Parameter(Mandatory)][int]$IntervalSeconds, [string]$SiteName, [string]$HostName, [string]$Url, [string]$MonitorName)
+    param([object]$Previous, [Parameter(Mandatory)][datetime]$NowUtc, [datetime]$BootTimeUtc = [datetime]::MinValue, [Parameter(Mandatory)][int]$GapThresholdSeconds, [Parameter(Mandatory)][int]$IntervalSeconds, [string]$SiteName, [string]$HostName, [string]$Url, [string]$MonitorName, [int]$SlowCarryOverSeconds = 0)
     if ($null -eq $Previous) { return $null }
     $restored = $null
     if ($Previous.IsDown -and $null -ne $Previous.OutageStartUtc) {
@@ -2901,7 +3015,10 @@ function Get-RestartNotice {
         'Outage in progress' = $outage
         'Endpoint'           = $Url
     }
-    if ($Previous.IsSlow) { $details['Slow period in progress'] = "Yes, since $($Previous.SlowStartLocalStr) local. Slow tracking starts fresh." }
+    if ($Previous.IsSlow) {
+        $slowKept = ($SlowCarryOverSeconds -gt 0 -and [int]$gap.TotalSeconds -le $SlowCarryOverSeconds)
+        $details['Slow period in progress'] = "Yes, since $($Previous.SlowStartLocalStr) local. $(if ($slowKept) { 'Tracking continues from that start.' } else { 'Slow tracking starts fresh.' })"
+    }
     [PSCustomObject]@{
         Subject       = "[MONITOR RESTARTED] $(Get-AlertLabel -MonitorName $MonitorName -SiteName $SiteName -HostName $HostName) - not running for $gapText"
         Body          = (New-AlertBody -Heading "$(if ($MonitorName) { "The $MonitorName monitor" } else { 'The monitor' }) restarted on $SiteName" -Details $details)
@@ -2968,7 +3085,7 @@ try { $bootUtc = ([datetime](Get-CimInstance -ClassName Win32_OperatingSystem -E
 catch { Write-Log -Level WARNING -Message "Could not read the server boot time. $($_.Exception.Message)" }
 $startUtc = (Get-Date).ToUniversalTime()
 $previous = Read-Heartbeat
-$notice = Get-RestartNotice -Previous $previous -NowUtc $startUtc -BootTimeUtc $bootUtc -GapThresholdSeconds ([math]::Max(60, 2 * ($IntervalSeconds + $TimeoutSeconds))) -IntervalSeconds $IntervalSeconds -SiteName $SiteName -HostName $env:COMPUTERNAME -Url $Url -MonitorName $MonitorName
+$notice = Get-RestartNotice -Previous $previous -NowUtc $startUtc -BootTimeUtc $bootUtc -GapThresholdSeconds ([math]::Max(60, 2 * ($IntervalSeconds + $TimeoutSeconds))) -IntervalSeconds $IntervalSeconds -SiteName $SiteName -HostName $env:COMPUTERNAME -Url $Url -MonitorName $MonitorName -SlowCarryOverSeconds ($SlowWindowMinutes * 60)
 Write-DropLog -Kind 'START' -Message "Monitor started on $env:COMPUTERNAME for site '$SiteName' (poll every $IntervalSeconds s, timeout $TimeoutSeconds s, down after $DownThreshold failures, slow at $SlowAlertPercent% of polls over $SlowThresholdMs ms or failed in $SlowWindowMinutes min)."
 if ($notice) {
     if ($notice.Subject) {
@@ -3145,20 +3262,28 @@ if (-not (Test-Path $InstallRoot)) {
 
 # Monitors from the old location move first, so the rest of this run sees them where everything else looks
 $null = Invoke-RootMove -Monitors (Get-PreviousRootMonitor)
+# Anything still there was declined or could not be moved, and is still polling
+$elsewhereMonitors = @(Get-PreviousRootMonitor)
 
 # An older HST-only install is offered a migration before the prompts, so its settings prefill them
 $existingMonitors = @(Get-InstalledMonitor)
 $legacy = Get-LegacyInstall
 $migrate = $false
 if ($legacy) {
-    Write-Question -Question "Move the older install at $($legacy.Dir) into $InstallRoot?" -Hint @(
+    Write-Question -Question "Move the older install at $($legacy.Dir) into ${InstallRoot}?" -Hint @(
         "Its settings and history come across, then its task and folder go. Nothing is removed until this run is finished.",
         "N leaves it running where it is."
     )
     $migrate = if ($NonInteractive) { $true } else { (Read-Choice -Prompt "Move" -Allowed @('Y','N') -Default 'Y') -eq 'Y' }
 }
 
-$MonitorName = Get-MonitorName -SavedDefault $(if ($migrate) { $LegacyMonitorName } else { "" }) -Existing $existingMonitors
+if ($legacy -and -not $migrate) {
+    $elsewhereMonitors += [PSCustomObject]@{
+        Name = $LegacyMonitorName; Slug = (ConvertTo-MonitorSlug $LegacyMonitorName); Dir = $legacy.Dir; Url = $legacy.Url
+        TaskName = $legacy.TaskName; TaskPath = $legacy.TaskPath; HasTask = $legacy.HasTask
+    }
+}
+$MonitorName = Get-MonitorName -SavedDefault $(if ($migrate) { $LegacyMonitorName } else { "" }) -Existing $existingMonitors -Elsewhere $elsewhereMonitors
 if (-not $MonitorName) {
     Write-Log -Level FAILED -Message "No monitor name. Nothing was installed. Exiting."
     exit 1
