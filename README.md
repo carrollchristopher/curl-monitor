@@ -2,7 +2,7 @@
 
 Always-on availability monitor for any URL, installed on a server at the site that depends on it. It runs as a SYSTEM scheduled task, polls the URL through its redirects with curl, and emails when the site loses access, when it stays slow, when it comes back, and when the monitor itself was not running.
 
-One server can run several monitors side by side, one per URL. Each gets its own folder, task, data files, and alert subjects, named after what you called it at install time, for example "HST eChart" or "Patient Portal".
+One server can run several monitors side by side, one per URL. Each gets its own folder, task, data files, and alert subjects, named after what you called it at install time, for example "GitHub Monitor" or "Patient Portal".
 
 ## What it does
 
@@ -15,13 +15,13 @@ One server can run several monitors side by side, one per URL. Each gets its own
 - Queues alerts that cannot be sent and retries them every minute for an hour.
 - Sends mail through Microsoft Graph with an app registration scoped to one shared mailbox (RBAC for Applications), or through Microsoft 365 direct send, an internal relay, or authenticated SMTP.
 
-Alert subjects read `[DOWN] HST eChart at Capital City (SERVER01) - unreachable`, so one inbox rule can sort by monitor, site, or server.
+Alert subjects read `[DOWN] GitHub Monitor at Main Office (SERVER01) - unreachable`, so one inbox rule can sort by monitor, site, or server.
 
 ## Install
 
 Run `Install-CurlMonitor.ps1` from an elevated Windows PowerShell 5.1 console on the site server. It asks whether you are installing or uninstalling, then:
 
-1. **Monitor name**, for example `HST eChart`. It names the folder, the scheduled task, and every alert.
+1. **Monitor name**, for example `GitHub Monitor`. It names the folder, the scheduled task, and every alert.
 2. **URL** to watch, http or https.
 3. **Site name**, which appears in every alert subject beside the monitor name.
 4. **Text the page must contain**, so a page that loads but comes back wrong still counts as down. Blank accepts any page that returns HTTP 200.
@@ -69,10 +69,10 @@ Copy `Test-CurlMonitorHealth.ps1` to the server and run it from an elevated Wind
 .\Test-CurlMonitorHealth.ps1
 ```
 
-It changes nothing and ends with WORKING or NOT WORKING CORRECTLY. Every monitor under the root gets its own section covering the task and process, the heartbeat age, the last poll, response times and failures over the last hour and 24 hours, gaps in recording, warnings in the monitor's own log, the mail secret, and a probe of the URL from the server. Use `-Monitor "HST eChart"` to check one.
+It changes nothing and ends with WORKING or NOT WORKING CORRECTLY. Every monitor under the root gets its own section covering the task and process, the heartbeat age, the last poll, response times and failures over the last hour and 24 hours, gaps in recording, warnings in the monitor's own log, the mail secret, and a probe of the URL from the server. Use `-Monitor "GitHub Monitor"` to check one.
 
 ```powershell
-.\Test-CurlMonitorHealth.ps1 -Monitor "HST eChart" -OutageDrill
+.\Test-CurlMonitorHealth.ps1 -Monitor "GitHub Monitor" -OutageDrill
 ```
 
 The drill makes only that monitor's own probes fail for about a minute, using a curl settings file in the profile of the account the monitor runs as, scoped to the monitored host. Browsers and other programs keep working. It confirms the monitor declares DOWN, sends the DOWN email, records RESOLVED, and sends the RESOLVED email. The drill leaves one short outage in the outage log. If the window is closed during the drill, a one-time cleanup task removes the file, and running the script again removes it immediately.

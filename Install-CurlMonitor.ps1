@@ -6,7 +6,7 @@
     Run this one script as administrator on a site server. It does everything with no second file to manage.
     1. Confirms it is running elevated, relaunching as administrator if not, and checks curl.exe and the
        ScheduledTasks module are present.
-    2. Asks what to call this monitor, for example "HST eChart", which names its folder, its scheduled task, and
+    2. Asks what to call this monitor, for example "GitHub Monitor", which names its folder, its scheduled task, and
        its alerts. One server can run several monitors, one per URL, side by side. Re-running with the same name
        upgrades that monitor in place and leaves the others alone.
     3. Asks for the URL to watch, the site name, and optional text that must appear on the page, all prefilled
@@ -74,7 +74,7 @@ $PreviousRoot          = "C:\ProgramData\DIT\CurlMonitor"   # Where monitors liv
 $PreviousTaskPath      = "\DIT\"
 
 # Prompted every run, prefilled from the last one. In non-interactive mode these are used as-is.
-$MonitorName           = ""                            # For example "HST eChart". Names the folder, the task, and the alerts.
+$MonitorName           = ""                            # For example "GitHub Monitor". Names the folder, the task, and the alerts.
 $Url                   = ""                            # The URL to watch, http:// or https://
 $ExpectedContentMarker = ""                            # Text that must appear on the page. Blank checks only the status and the size.
 
@@ -1313,7 +1313,7 @@ function Get-MonitorName {
         Write-Host "Already installed here"
         foreach ($m in @($Existing)) { Write-Host ("  {0}  {1}" -f $m.Name, $(if ($m.Url) { $m.Url } else { 'URL not recorded' })) }
     }
-    $hint = @("Names its folder, its task, and every alert subject. For example: HST eChart")
+    $hint = @("Names its folder, its task, and every alert subject. For example: GitHub Monitor")
     if (@($Existing).Count -gt 0) { $hint += "One of the names above upgrades that monitor. A new name adds another beside it." }
     while ($true) {
         Write-Question -Question "Monitor name" -Hint $hint
