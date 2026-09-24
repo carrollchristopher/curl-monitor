@@ -594,9 +594,11 @@ function Invoke-MonitorCheck {
     }
 
     Write-Section "Alert delivery"
-    if (-not $cfg.SendEmail) { Write-Check FAIL "Email alerts are turned off in this monitor." }
+    if ("$($cfg.MailMethod)" -eq 'None') { Write-Check INFO "This monitor was installed without alerts. Nothing is emailed, and outages, slow periods and every poll are still recorded." }
+    elseif (-not $cfg.SendEmail) { Write-Check WARN "Mail is configured but sending is switched off in this monitor, so no alert leaves the server." }
     $credPath = "$($cfg.SmtpCredentialFile)"
     switch ("$($cfg.MailMethod)") {
+        'None' { }
         'Graph' {
             $exp = [datetime]::MinValue
             if ([datetime]::TryParseExact("$($cfg.GraphSecretExpires)", 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$exp)) {
