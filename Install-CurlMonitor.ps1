@@ -1301,6 +1301,9 @@ function Get-MonitorName {
     # $Elsewhere holds monitors installed somewhere this run is not writing to, such as ones left in the old
     # location when the move was declined. Reusing one of those names would leave two monitors on the same URL.
     param([string]$SavedDefault = "", [object[]]$Existing = @(), [object[]]$Elsewhere = @())
+    # PowerShell 7 hands an empty result to an [object[]] parameter as one $null, which would list a blank monitor
+    $Existing = @($Existing | Where-Object { $null -ne $_ })
+    $Elsewhere = @($Elsewhere | Where-Object { $null -ne $_ })
     if (-not [string]::IsNullOrWhiteSpace($MonitorNameOverride)) {
         $clean = ConvertTo-SafeSiteName $MonitorNameOverride
         if ($clean -and ($TaskNamePrefix + $clean).Length -gt $MaxTaskNameLength) {
@@ -1406,6 +1409,7 @@ function Test-MonitorNameLength {
 function Get-SlugClash {
     # The installed monitor whose folder this name would land in, when that monitor goes by another name
     param([Parameter(Mandatory)][string]$Name, [object[]]$Existing = @())
+    $Existing = @($Existing | Where-Object { $null -ne $_ })
     $slug = ConvertTo-MonitorSlug $Name
     foreach ($m in @($Existing)) {
         # Slugs match case-insensitively the way NTFS does; a name that differs only in case still has to adopt
@@ -1686,7 +1690,8 @@ function Move-MonitorToNewRoot {
 function Invoke-RootMove {
     # Offers to move every monitor out of the old location. Returns how many moved.
     param([object[]]$Monitors, [string]$NewRoot = $InstallRoot, [string]$OldRoot = $PreviousRoot)
-    $list = @($Monitors)
+    # A call that returned nothing arrives here as one $null under PowerShell 7, so empty really means empty
+    $list = @($Monitors | Where-Object { $null -ne $_ })
     if (@($list).Count -eq 0) { return 0 }
     Write-Host ""
     Write-Host "Found in the old location $OldRoot"
@@ -1817,6 +1822,7 @@ function Get-RemovableMonitor {
 function Show-RemovableMonitor {
     # Prints the numbered listing the operator picks from
     param([object[]]$Items)
+    $Items = @($Items | Where-Object { $null -ne $_ })
     $i = 0
     foreach ($m in @($Items)) {
         $i++
@@ -1829,7 +1835,7 @@ function Show-RemovableMonitor {
 function Select-RemovableMonitor {
     # Resolves a typed name to one monitor. Exact spelling wins, then case-insensitive, then the folder slug.
     param([Parameter(Mandatory)][object[]]$Items, [Parameter(Mandatory)][string]$Requested)
-    $list = @($Items)
+    $list = @($Items | Where-Object { $null -ne $_ })
     $wanted = "$Requested".Trim()
     if (-not $wanted) { Write-Log -Level WARNING -Message "Type a number, a name, or X to cancel."; return $null }
     $match = @($list | Where-Object { $_.Name -ceq $wanted })
@@ -1961,7 +1967,7 @@ function Invoke-UninstallFlow {
         [string]$PrevRoot = $PreviousRoot,
         [string]$PrevPath = $PreviousTaskPath
     )
-    $items = @(Get-RemovableMonitor -Root $Root -Path $Path -PrevRoot $PrevRoot -PrevPath $PrevPath)
+    $items = @(Get-RemovableMonitor -Root $Root -Path $Path -PrevRoot $PrevRoot -PrevPath $PrevPath | Where-Object { $null -ne $_ })
     if (@($items).Count -eq 0) {
         Write-Log -Level FOUND -Message "No monitor is installed under '$Root' and no monitor task exists under '$Path'. Nothing to remove."
         return 0
@@ -2019,7 +2025,7 @@ function Invoke-UninstallFlow {
         if (-not $KeepHistory) { Write-Log -Level WARNING -Message "The history goes with the folder. That cannot be undone." }
     }
     $result = Remove-MonitorInstall -Monitor $target -KeepHistory $KeepHistory -KeepRoot $KeepRoot
-    $left = @(Get-RemovableMonitor -Root $Root -Path $Path -PrevRoot $PrevRoot -PrevPath $PrevPath)
+    $left = @(Get-RemovableMonitor -Root $Root -Path $Path -PrevRoot $PrevRoot -PrevPath $PrevPath | Where-Object { $null -ne $_ })
     if (@($left).Count -eq 0 -and (Test-Path -LiteralPath $Root)) {
         if (@(Get-ChildItem -LiteralPath $Root -Force -ErrorAction SilentlyContinue).Count -eq 0) {
             try { Remove-Item -LiteralPath $Root -Force -ErrorAction Stop; Write-Log -Level INFORMATIONAL -Message "Removed the empty install root '$Root'." } catch { }
@@ -3263,10 +3269,10 @@ if (-not (Test-Path $InstallRoot)) {
 # Monitors from the old location move first, so the rest of this run sees them where everything else looks
 $null = Invoke-RootMove -Monitors (Get-PreviousRootMonitor)
 # Anything still there was declined or could not be moved, and is still polling
-$elsewhereMonitors = @(Get-PreviousRootMonitor)
+$elsewhereMonitors = @(Get-PreviousRootMonitor | Where-Object { $null -ne $_ })
 
 # An older HST-only install is offered a migration before the prompts, so its settings prefill them
-$existingMonitors = @(Get-InstalledMonitor)
+$existingMonitors = @(Get-InstalledMonitor | Where-Object { $null -ne $_ })
 $legacy = Get-LegacyInstall
 $migrate = $false
 if ($legacy) {

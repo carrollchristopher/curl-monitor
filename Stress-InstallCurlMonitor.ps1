@@ -1737,6 +1737,8 @@ Section "N. The install root, the move out of the old location, and the shorter 
 $nRoot = [System.IO.Path]::GetFullPath((Join-Path $InstallDir 'rootmove'))
 $nTaskPath = '\CurlMonitorTest\'
 function NDropTask { param([string]$Name) try { Unregister-ScheduledTask -TaskPath $nTaskPath -TaskName $Name -Confirm:$false -ErrorAction Stop } catch { } }
+# A run that died mid-section could have left a task here, which would make the checks below read machine state
+foreach ($stale in @(Get-ScheduledTask -TaskPath $nTaskPath -ErrorAction SilentlyContinue)) { NDropTask -Name $stale.TaskName }
 if (Test-Path $nRoot) { Remove-Item $nRoot -Recurse -Force -ErrorAction SilentlyContinue }
 $nOld = Join-Path $nRoot 'old'; $nNew = Join-Path $nRoot 'new'
 New-Item $nNew -ItemType Directory -Force | Out-Null
@@ -1833,6 +1835,21 @@ Check "N10 typing that name interactively offers to move it, and N asks for anot
 # What the move itself leaves: the task it registered, at the new path, under the name it was given
 $nLeftTask = Get-ScheduledTask -TaskName 'Curl Monitor - HST eChart' -TaskPath $nTaskPath -ErrorAction SilentlyContinue
 Check "N8 the move registered the monitor's task at the new path, or said plainly that it could not" (($null -ne $nLeftTask -and "$($nLeftTask.Actions[0].Arguments)" -like "*$nDest*") -or (($script:NLogs -join "`n") -match 'could not register its task|rather than running'))
+# PowerShell 7 binds a call that returned nothing to an [object[]] parameter as an array holding one $null,
+# which listed a blank monitor and passed $null to the move. 5.1 binds it as an empty array, so this only ever
+# showed up on a server where the installer was run under 7.
+$nEmptyOld = Join-Path $nRoot 'empty-old'
+New-Item (Join-Path $nEmptyOld 'leftovers') -ItemType Directory -Force | Out-Null
+$script:NOut = @()
+$script:NLogs = @()
+$nNothing = Invoke-RootMove -Monitors (Get-PreviousRootMonitor -Root $nEmptyOld -Path $nTaskPath -NewRoot $nNew) -NewRoot $nNew -OldRoot $nEmptyOld
+Check "N11 an old location holding nothing to move asks nothing, prints nothing and moves nothing" ($nNothing -eq 0 -and @($script:NOut).Count -eq 0)
+$script:NOut = @()
+Check "N11 a list that is only a null counts as empty where one can arrive" ((Invoke-RootMove -Monitors @($null) -NewRoot $nNew -OldRoot $nEmptyOld) -eq 0 -and @($script:NOut).Count -eq 0)
+$script:NOut = @()
+Show-RemovableMonitor -Items @($null)
+Check "N11 the removal listing prints no blank row for a null entry" (@($script:NOut).Count -eq 0)
+
 NDropTask -Name 'Curl Monitor - HST eChart'
 Check "N8 this section leaves none of its own tasks behind" ($null -eq (Get-ScheduledTask -TaskName 'Curl Monitor - HST eChart' -TaskPath $nTaskPath -ErrorAction SilentlyContinue))
 Remove-Item function:Write-Host -ErrorAction SilentlyContinue

@@ -211,6 +211,7 @@ function New-CommitSubject {
 
 function New-CommitBody {
     param([Parameter(Mandatory)][object[]]$Measurements)
+    $Measurements = @($Measurements | Where-Object { $null -ne $_ })
     $lines = foreach ($m in $Measurements) {
         $outage = if ($m.Stats.Outages -gt 0) { ", $($m.Stats.Outages) outage$(if ($m.Stats.Outages -eq 1) { '' } else { 's' }) totalling $($m.Stats.TotalOutageSeconds)s" } else { '' }
         "$($m.Code): $($m.Stats.Polls) polls, $('{0:N2}' -f $m.Stats.AvailabilityPercent)% available, p95 $(if ($null -ne $m.Stats.P95Ms) { "$($m.Stats.P95Ms) ms" } else { 'no successful polls' })$outage"
@@ -221,6 +222,7 @@ function New-CommitBody {
 function New-TelemetryReport {
     # The dated report, rebuilt from every row already published for that date so a second window keeps the first
     param([Parameter(Mandatory)][datetime]$Date, [Parameter(Mandatory)][object[]]$Rows)
+    $Rows = @($Rows | Where-Object { $null -ne $_ })
     $sb = New-Object Text.StringBuilder
     [void]$sb.AppendLine("# Endpoint availability, $($Date.ToString('yyyy-MM-dd'))")
     [void]$sb.AppendLine()
@@ -263,6 +265,7 @@ function Update-ReadmeTable {
 
 function New-ReadmeTable {
     param([Parameter(Mandatory)][object[]]$Rows, [Parameter(Mandatory)][datetime]$AsOf)
+    $Rows = @($Rows | Where-Object { $null -ne $_ })
     $sb = New-Object Text.StringBuilder
     [void]$sb.AppendLine("Last 24 hours, measured to $($AsOf.ToString('yyyy-MM-dd HH:mm')) local.")
     [void]$sb.AppendLine()
