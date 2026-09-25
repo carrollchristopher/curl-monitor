@@ -3,7 +3,7 @@ $script:pass=0; $script:fail=0; $script:failed=@()
 function Check($n,$c){ if($c){$script:pass++} else {$script:fail++; $script:failed += $n; Write-Host "FAIL: $n"} }
 function Section($n){ Write-Host ""; Write-Host "== $n ==" }
 
-$installerPath = 'C:\tmp\Install-CurlMonitor.ps1'
+$installerPath = Join-Path $PSScriptRoot 'Install-CurlMonitor.ps1'
 $T=$null;$E=$null
 $ast=[System.Management.Automation.Language.Parser]::ParseFile($installerPath,[ref]$T,[ref]$E)
 $hereNodes = $ast.FindAll({param($n) $n -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $n.StringConstantType -eq 'SingleQuotedHereString'},$true)
@@ -139,7 +139,11 @@ if ($logDown) {
     Check "M1 mail send failure logged FAILED, loop continued" ($logText -match 'FAILED \|')
     $dropM1 = Get-Content (Join-Path $runDir 'Drops.log') -ErrorAction SilentlyContinue
     Check "M1 drops log: start line, one FAIL per failed poll, DOWN, alert not sent, nothing healthy" ($dropM1 -and @($dropM1 | Where-Object { $_ -match '\| START     \|' }).Count -eq 1 -and @($dropM1 | Where-Object { $_ -match '\| FAIL      \| Site=WinDown Code=000' }).Count -ge 8 -and @($dropM1 | Where-Object { $_ -match '\| DOWN      \| Declared DOWN for WinDown after 3' }).Count -eq 1 -and @($dropM1 | Where-Object { $_ -match '\| ALERT     \| Not sent, retrying every minute.*\[DOWN\] WinDown' }).Count -eq 1 -and -not (($dropM1 -join "`n") -match 'SUCCESS|Code=200'))
-    Check "M1 polling continued after the failed alert" (($logText -split "`n" | Select-String 'FAILED' | Select-Object -First 1).LineNumber -lt (Get-Content $logDown.FullName).Count - 3)
+    # Anchored on the alert send failing, not on a failed poll: every poll against a closed port logs FAILED
+$m1Lines = @($logText -split "`n")
+$m1SendFail = @($m1Lines | Select-String 'Could not send alert email' | Select-Object -First 1)
+$m1PollsAfter = if (@($m1SendFail).Count -eq 1) { @($m1Lines[@($m1SendFail)[0].LineNumber..($m1Lines.Count - 1)] | Where-Object { $_ -match 'Site=' }).Count } else { 0 }
+Check "M1 polling continued after the failed alert" (@($m1SendFail).Count -eq 1 -and $m1PollsAfter -ge 3)
 }
 
 # M2: the real HST endpoint with the installer defaults: redirects followed to the sign-in page, UP rows, no DOWN

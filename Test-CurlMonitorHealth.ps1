@@ -12,7 +12,7 @@
 
     -OutageDrill proves alerting end to end. For about a minute it makes the monitor's own probes fail, by placing
     a small curl settings file in the profile of the account the monitor runs as. The file sends curl.exe requests
-    for the HST host to a local port that refuses connections. Browsers and every other program keep working, and
+    for the monitored host to a local port that refuses connections. Browsers and every other program keep working, and
     curl.exe requests to other hosts are unaffected. It waits for the monitor to declare DOWN and send the alert,
     removes the file, and waits for RESOLVED. The file is removed when the drill ends or is stopped with Ctrl+C. If
     the drill window is closed, a one-time SYSTEM scheduled task removes it after DrillCleanupMinutes. The drill
@@ -276,7 +276,7 @@ function Get-DrillOwner {
 }
 
 function Add-DrillBlock {
-    # Sends curl.exe requests for the HST host, under the monitor's account, to a local port that refuses connections
+    # Sends curl.exe requests for the monitored host, under the monitor's account, to a local port that refuses connections
     param([Parameter(Mandatory)][string]$ConfigPath, [Parameter(Mandatory)][string]$Url)
     $u = [uri]$Url
     $text = "$script:DrillMarker`r`n# pid $PID started $((Get-Date).ToUniversalTime().ToString('o'))`r`nconnect-to = `"$($u.Host):$($u.Port):127.0.0.1:9`"`r`n"

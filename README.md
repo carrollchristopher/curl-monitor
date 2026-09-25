@@ -123,7 +123,7 @@ Last 24 hours, measured to 2026-09-25 07:15 local.
 
 ## Testing
 
-`Stress-InstallCurlMonitor.ps1` expects a copy of the installer at `C:\tmp\Install-CurlMonitor.ps1` and a copy under `C:\mnt\user-data\outputs\`. It runs under pwsh 7 or Windows PowerShell 5.1. `Stress-WindowsCurlMonitor.ps1` runs under Windows PowerShell 5.1. Run the live harness on its own; its timing checks are sensitive to CPU load.
+`Stress-InstallCurlMonitor.ps1` audits the installer sitting beside it. It runs under pwsh 7 or Windows PowerShell 5.1. `Stress-WindowsCurlMonitor.ps1` runs under Windows PowerShell 5.1. Run the live harness on its own; its timing checks are sensitive to CPU load.
 
 ```powershell
 Invoke-ScriptAnalyzer -Path .\Install-CurlMonitor.ps1 -Settings .\PSScriptAnalyzerSettings.psd1

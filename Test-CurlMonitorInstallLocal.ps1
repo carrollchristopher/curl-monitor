@@ -9,13 +9,13 @@
     2. After a settle period the live output is checked: the task runs as SYSTEM at startup with no time limit,
        the monitor process is owned by SYSTEM, the credential file is locked to SYSTEM and Administrators and
        decrypts to the secret supplied here, the install folder is locked down, and the latency CSV shows polls
-       that followed the endpoint's redirects to a populated sign-in page.
+       that followed the endpoint's redirects to a populated page.
     3. Re-install over the running task with saved settings (Enter through every prompt except the secret) and
        confirm the old monitor stopped, the task is running again, and the CSV kept its schema.
     4. Removes the task and install folder unless -KeepInstalled. Copies of the logs and CSVs go to -OutDir.
 
 .REQUIREMENTS
-    Elevated PowerShell 5.1 or 7. Internet access to the tenant and the HST endpoint.
+    Elevated PowerShell 5.1 or 7. Internet access to the tenant and the URL being monitored.
 
 .OUTPUTS
     PASS/FAIL lines, a summary count, result.json and the installer logs in -OutDir. Exit code 1 on any failure.
@@ -43,7 +43,7 @@ param(
     [string]$SecretExpires = '',
     [int]$SettleSeconds = 45,
     [switch]$KeepInstalled,
-    [string]$OutDir = (Join-Path $env:TEMP 'HSTMonitorLocalTest')
+    [string]$OutDir = (Join-Path $env:TEMP 'CurlMonitorLocalTest')
 )
 
 $ErrorActionPreference = 'Stop'

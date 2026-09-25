@@ -22,7 +22,7 @@
     Author:      Christopher Carroll
     Created:     09/04/2026
     Idempotency: Read-only apart from the single test email. Safe to re-run.
-    Context:     Compass HST monitor. Discriminates a stale Exchange authorization cache from a
+    Context:     A site HST monitor. Discriminates a stale Exchange authorization cache from a
                  structural misconfiguration after RBAC for Applications setup.
 
 .LINK

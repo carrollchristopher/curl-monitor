@@ -29,7 +29,8 @@
 
 .REQUIREMENTS
     Administrative rights. Windows 10 1803+ or Windows Server 2019+ (ships with curl.exe and the ScheduledTasks module).
-    Outbound SMTP from this server to the chosen mail host.
+    Outbound HTTPS to the monitored URL, plus outbound HTTPS to login.microsoftonline.com and
+    graph.microsoft.com for Graph mail, or outbound SMTP to the chosen mail host for the other methods.
 
 .OUTPUTS
     Deployed monitor script, saved settings JSON, optional encrypted credential file, and a registered running
@@ -43,8 +44,9 @@
     Context:     Written for an HST eChart slowness investigation across shared-resource clinic sites, then
                  generalised: one installer, any URL, one folder and task per monitor. Scheduled Task chosen
                  over a service wrapper to avoid a third-party binary at a healthcare client.
-                 Direct Send is recommended because Microsoft disables Basic auth SMTP AUTH by default at the end
-                 of December 2026; Direct Send and IP-based relay are not affected.
+                 Graph is recommended because Microsoft disables Basic auth SMTP AUTH by default at the end of
+                 December 2026, which retires the username and password method; Graph, Direct Send and IP-based
+                 relay are not affected.
 
 .LINK
     https://curl.se/docs/manpage.html
@@ -2134,10 +2136,10 @@ $Template_MonitorScript = @'
 .DESCRIPTION
     Deployed by Install-CurlMonitor.ps1. Runs continuously as SYSTEM, one instance per monitored URL.
     1. Validates curl.exe and the output folder, starts a daily transcript log, and prunes old logs.
-    2. Probes the endpoint every interval, following redirects to the sign-in page, and captures DNS, connect,
+    2. Probes the endpoint every interval, following redirects, and captures DNS, connect,
        TLS, TTFB, redirect, and total timings plus HTTP code, redirect count, final URL, size, answering backend
        IP, and the curl exit code with a plain-English reason.
-    3. Confirms the sign-in page populated: the content marker is present and the body meets the minimum size.
+    3. Confirms the page is populated: the body meets the minimum size and, when one was given, contains the text.
     4. Appends one timestamped row (local and UTC) to a monthly CSV on every poll, and writes failed or slow polls,
        outage transitions, alert delivery problems, and starts and restarts to Drops.log, never a healthy poll.
     5. Tracks up and down state with true outage onset, alerts on state change with the site in the subject,
@@ -2414,7 +2416,7 @@ function Get-SecretExpiryWarning {
 }
 
 function Get-ProbeResult {
-    # Runs one timed request, following redirects to the sign-in page the way a browser would. stderr is discarded so parsing stays clean.
+    # Runs one timed request, following redirects to the page the way a browser would. stderr is discarded so parsing stays clean.
     # The body lands in the install folder, not the global temp folder, and is removed after the size and marker checks.
     $tempBody = Join-Path $InstallDir 'probe-body.tmp'
     $format = 'DNS=%{time_namelookup}\nCONNECT=%{time_connect}\nTLS=%{time_appconnect}\nTTFB=%{time_starttransfer}\nTOTAL=%{time_total}\nREDIRTIME=%{time_redirect}\nREDIRECTS=%{num_redirects}\nCODE=%{http_code}\nSIZE=%{size_download}\nIP=%{remote_ip}\nFINAL=%{url_effective}'
@@ -2781,7 +2783,7 @@ function Get-DailySummary {
     $details['Endpoint'] = $Url
     $details['Details'] = "Drops.log on $HostName"
     [PSCustomObject]@{
-        Subject      = "[DAILY] $(Get-AlertLabel -MonitorName $MonitorName -SiteName $SiteName -HostName $HostName) - $(& $count $slow 'slow poll'), $(& $count $failed 'failed poll'), $(& $count $downs 'outage') in 24 hours"
+        Subject      = "[DAILY] $(Get-AlertLabel -MonitorName $MonitorName -SiteName $SiteName -HostName $HostName) - $(& $count $slow 'slow poll'), $(& $count $failed 'failed poll'), $(& $count $downs 'outage')$(if ($restarts) { ", $(& $count $restarts 'monitor restart')" })$(if ($errors) { ", $(& $count $errors 'monitor error')" }) in 24 hours"
         Body         = (New-AlertBody -Heading "Daily summary for $(if ($MonitorName) { $MonitorName } else { 'the endpoint' }) at $SiteName" -Details $details)
         SlowPolls    = $slow
         FailedPolls  = $failed
@@ -3001,7 +3003,7 @@ function Get-RestartNotice {
     if ($gap.Ticks -lt 0) { $gap = [TimeSpan]::Zero }
     # The installer marks the heartbeat when it stops the monitor on purpose: no notice, but any outage still carries over
     if ($Previous.Stopped -or $gap.TotalSeconds -lt $GapThresholdSeconds) {
-        return [PSCustomObject]@{ Subject = $null; Body = $null; Cause = $null; RestoredState = $restored; GapSeconds = [int]$gap.TotalSeconds; Stopped = [bool]$Previous.Stopped }
+        return [PSCustomObject]@{ Subject = $null; Body = $null; Cause = $null; RestoredState = $restored; GapSeconds = [int][math]::Floor($gap.TotalSeconds); Stopped = [bool]$Previous.Stopped }
     }
     $gapText = Format-Duration $gap
     $fmt = { param([datetime]$d) "$($d.ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss')) local ($($d.ToString('yyyy-MM-dd HH:mm:ss')) UTC)" }
@@ -3031,7 +3033,7 @@ function Get-RestartNotice {
         Cause         = $cause
         RestoredState = $restored
         Stopped       = $false
-        GapSeconds    = [int]$gap.TotalSeconds
+        GapSeconds    = [int][math]::Floor($gap.TotalSeconds)
     }
 }
 

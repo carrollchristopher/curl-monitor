@@ -3,8 +3,8 @@ $script:pass=0; $script:fail=0; $script:failed=@()
 function Check($n,$c){ if($c){$script:pass++} else {$script:fail++; $script:failed += $n; Write-Host "FAIL: $n"} }
 function Section($n){ Write-Host ""; Write-Host "== $n ==" }
 
-$installerPath = '/tmp/Install-CurlMonitor.ps1'
-$src = Get-Content -Raw $installerPath
+$installerPath = Join-Path $PSScriptRoot 'Install-CurlMonitor.ps1'
+$src = Get-Content -Raw -Encoding UTF8 $installerPath
 $T=$null;$E=$null
 $ast=[System.Management.Automation.Language.Parser]::ParseFile($installerPath,[ref]$T,[ref]$E)
 
@@ -606,7 +606,7 @@ $lines = @(
     '2026-09-15 07:00:01 | FAIL      | Site=CapCity Code=000 Reason=Timed out'
 )
 $sum = Get-DailySummary -Lines $lines -NowLocal $d7 -SlowThresholdMs 3000 -SiteName 'CapCity' -HostName 'HOST1' -Url 'http://x'
-Check "DS2 summary counts only the 24 hours before the send, subject reads naturally" ($sum -and $sum.Subject -eq '[DAILY] CapCity (HOST1) - 3 slow polls, 2 failed polls, 1 outage in 24 hours' -and $sum.SlowPolls -eq 3 -and $sum.FailedPolls -eq 2 -and $sum.Outages -eq 1 -and $sum.SlowPeriods -eq 1 -and $sum.WorstMs -eq 9001)
+Check "DS2 summary counts only the 24 hours before the send, subject reads naturally" ($sum -and $sum.Subject -eq '[DAILY] CapCity (HOST1) - 3 slow polls, 2 failed polls, 1 outage, 1 monitor restart in 24 hours' -and $sum.SlowPolls -eq 3 -and $sum.FailedPolls -eq 2 -and $sum.Outages -eq 1 -and $sum.SlowPeriods -eq 1 -and $sum.WorstMs -eq 9001)
 Check "DS2 summary body: worst response, failure reasons, outage length, busiest hour, restarts" ($sum.Body -match '<td[^>]*>Slow polls</td><td[^>]*>3 slower than 3000 ms, worst 9001 ms</td>' -and $sum.Body -match '<td[^>]*>Failed polls</td><td[^>]*>2 \((Timed out x1, HTTP 503 x1|HTTP 503 x1, Timed out x1)\)</td>' -and $sum.Body -match '<td[^>]*>Outages</td><td[^>]*>1, lasting 02m 10s</td>' -and $sum.Body -match '<td[^>]*>Busiest hour</td><td[^>]*>06:00 to 06:59, 5 slow or failed polls</td>' -and $sum.Body -match '<td[^>]*>Monitor restarts</td><td[^>]*>1</td>' -and $sum.Body -match '<td[^>]*>Server</td><td[^>]*>HOST1</td>')
 Check "DS3 nothing went wrong: no summary" ($null -eq (Get-DailySummary -Lines @('2026-09-15 06:00:00 | START     | x', '2026-09-15 06:30:00 | ALERT     | Sent: y', '2026-09-15 06:40:00 | STOP      | z') -NowLocal $d7 -SiteName 'CapCity' -HostName 'HOST1') -and $null -eq (Get-DailySummary -Lines @() -NowLocal $d7 -SiteName 'CapCity' -HostName 'HOST1'))
 $ongoing = Get-DailySummary -Lines @('2026-09-14 06:00:00 | DOWN      | Declared DOWN for CapCity after 3 consecutive failures (Timed out).', '2026-09-15 06:30:00 | REMINDER  | Reminder raised for CapCity, down for 24h 30m.', '2026-09-15 06:40:00 | FAIL      | Site=CapCity Code=000 Reason=Timed out') -NowLocal $d7 -SiteName 'CapCity' -HostName 'HOST1'
@@ -676,10 +676,10 @@ Check "Live HST: sign-in page populated (marker and size)" ($p.ContentOk -and [i
 Check "Live HST: classified UP" (-not (($p.CurlExit -ne 0) -or ($p.HttpCode -ne '200') -or (-not $p.ContentOk) -or ($null -eq $p.TotalMs)))
 $MaxRedirects=0; $p=Get-ProbeResult
 Check "Redirect cap hit: exit 47, last code 302, classified DOWN" ($p.CurlExit -eq 47 -and $p.Reason -eq 'Too many redirects' -and $p.HttpCode -eq '302' -and (($p.HttpCode -ne '200') -or (-not $p.ContentOk)))
-$MaxRedirects=0; $Url='https://prodasp09.hstpathways.com/p95_CSP/HSTeChart/'; $TimeoutSeconds=15
+$MaxRedirects=5; $Url='https://prodasp09.hstpathways.com/p95_CSP/zzz-no-such-path'; $TimeoutSeconds=15
 $p=Get-ProbeResult
 $MaxRedirects=5
-Check "Clean non-200 without a curl error names the HTTP code as the reason" ($p.CurlExit -eq 47 -or ($p.CurlExit -eq 0 -and $p.Reason -eq "HTTP $($p.HttpCode)"))
+Check "Clean non-200 without a curl error names the HTTP code as the reason" ($p.CurlExit -eq 0 -and $p.HttpCode -ne '200' -and $p.Reason -eq "HTTP $($p.HttpCode)" -and -not $p.ContentOk)
 $MaxRedirects=5; $ExpectedContentMarker=''; $MinPopulatedBytes=100
 
 # Install-time preflight uses the same redirect handling
