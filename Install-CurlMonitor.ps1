@@ -327,7 +327,8 @@ function Save-InstallSettings {
     param([Parameter(Mandatory)][hashtable]$Settings)
     $path = Join-Path $InstallDir $SettingsFileName
     try {
-        $Settings | ConvertTo-Json -Depth 3 | Set-Content -Path $path -Encoding UTF8 -Force
+        # -Encoding UTF8 means BOM in 5.1 and no BOM in 7, and 5.1 reads a BOM-less file as ANSI. State it instead.
+        [System.IO.File]::WriteAllText($path, ($Settings | ConvertTo-Json -Depth 3), (New-Object System.Text.UTF8Encoding($true)))
         Write-Log -Level CREATED -Message "Saved settings to '$path'."
     }
     catch {
@@ -391,8 +392,10 @@ function Protect-InstallFolder {
     $trusted = @('NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators', 'NT SERVICE\TrustedInstaller')
     $owner = (Get-Acl -Path $Path).Owner
     if ($owner -notin $trusted) {
+        # /C keeps the tree walk going past a busy object, which also makes the exit code always zero, so the
+        # owner of the folder itself is read back instead.
         & icacls.exe "$Path" /setowner "*S-1-5-32-544" /T /C | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "icacls could not take ownership of '$Path' (exit $LASTEXITCODE)." }
+        if ((Get-Acl -Path $Path).Owner -notin $trusted) { throw "icacls could not take ownership of '$Path'." }
         if ($OwnerOnly) { & icacls.exe "$Path" /remove:g "$owner" | Out-Null }
         Write-Log -Level WARNING -Message "'$Path' was owned by '$owner'. Ownership moved to Administrators."
     }
@@ -406,7 +409,6 @@ function Protect-InstallFolder {
         if ($item.PSIsContainer) { continue }
         if ($item.Name -eq $CredentialFileName) { continue }
         & icacls.exe "$($item.FullName)" /reset /C | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "icacls could not reset permissions on '$($item.FullName)' (exit $LASTEXITCODE)." }
     }
 }
 
@@ -1316,6 +1318,11 @@ function Get-MonitorName {
             Write-Log -Level FAILED -Message "'$clean' is still installed outside '$InstallRoot' and could not be moved. Installing it here as well would leave two monitors on the same URL. Nothing was installed."
             return ""
         }
+        $clashOverride = if ($clean) { Get-SlugClash -Name $clean -Existing $Existing } else { $null }
+        if ($clashOverride) {
+            Write-Log -Level WARNING -Message "'$clean' uses the same folder as the installed monitor '$($clashOverride.Name)'. Upgrading that monitor instead of overwriting it."
+            return $clashOverride.Name
+        }
         if ($clean) { Write-Log -Level FOUND -Message "Monitor name set from override: '$clean'."; return $clean }
     }
     $default = $SavedDefault
@@ -1641,7 +1648,9 @@ function Move-MonitorToNewRoot {
         }
         catch { Remove-Item -Path $hb -Force -ErrorAction SilentlyContinue }
     }
-    try { Move-Item -LiteralPath $Monitor.Dir -Destination $dest -ErrorAction Stop }
+    # One rename: Move-Item can copy file by file and leave half the monitor in each root when one is locked.
+    # Both roots are on the same volume, so a rename is all this ever needs.
+    try { [System.IO.Directory]::Move($Monitor.Dir, $dest) }
     catch {
         Write-Log -Level WARNING -Message "Could not move '$($Monitor.Dir)'. $($_.Exception.Message)"
         if ($hadTask) {
@@ -1913,7 +1922,7 @@ function Move-MonitorHistory {
 function Remove-MonitorInstall {
     # Stops the task and its process, keeps the history when asked, then deletes the folder. Never throws, and
     # never touches another monitor. Returns what was and was not removed.
-    param([Parameter(Mandatory)]$Monitor, [bool]$KeepHistory = $true, [string]$KeepRoot = $HistoryKeepRoot)
+    param([Parameter(Mandatory)]$Monitor, [bool]$KeepHistory = $true, [string]$KeepRoot = $HistoryKeepRoot, [switch]$TaskOnly)
     $problems = New-Object System.Collections.ArrayList
     $taskRemoved = $false
     $task = Get-ScheduledTask -TaskName $Monitor.TaskName -TaskPath $Monitor.TaskPath -ErrorAction SilentlyContinue
@@ -1935,11 +1944,15 @@ function Remove-MonitorInstall {
         $taskRemoved = $true
         Write-Log -Level INFORMATIONAL -Message "No task '$($Monitor.TaskPath)$($Monitor.TaskName)' to remove."
     }
-    if (Test-Path -LiteralPath $Monitor.Dir) { $null = Stop-MonitorProcess -Dir $Monitor.Dir }
+    if (-not $TaskOnly -and (Test-Path -LiteralPath $Monitor.Dir)) { $null = Stop-MonitorProcess -Dir $Monitor.Dir }
     $historyPath = $null
-    if ($KeepHistory) { $historyPath = Move-MonitorHistory -Monitor $Monitor -KeepRoot $KeepRoot -Problems $problems }
+    if ($KeepHistory -and -not $TaskOnly) { $historyPath = Move-MonitorHistory -Monitor $Monitor -KeepRoot $KeepRoot -Problems $problems }
     $folderRemoved = $false
-    if (Test-Path -LiteralPath $Monitor.Dir) {
+    if ($TaskOnly) {
+        $folderRemoved = $false
+        Write-Log -Level INFORMATIONAL -Message "'$($Monitor.Dir)' belongs to another monitor listed here, so only the task was removed."
+    }
+    elseif (Test-Path -LiteralPath $Monitor.Dir) {
         try { Remove-Item -LiteralPath $Monitor.Dir -Recurse -Force -ErrorAction Stop; $folderRemoved = $true }
         catch {
             Start-Sleep -Seconds 2
@@ -2026,7 +2039,12 @@ function Invoke-UninstallFlow {
         $KeepHistory = (Read-Choice -Prompt "Keep" -Allowed @('Y','N') -Default 'Y') -eq 'Y'
         if (-not $KeepHistory) { Write-Log -Level WARNING -Message "The history goes with the folder. That cannot be undone." }
     }
-    $result = Remove-MonitorInstall -Monitor $target -KeepHistory $KeepHistory -KeepRoot $KeepRoot
+    # A folder another listed entry owns is never deleted with this one: that entry's task is the thing to remove
+    $sharedDir = @(@($items) | Where-Object { $_ -ne $target -and $_.Dir -and $target.Dir -and $_.Dir -eq $target.Dir })
+    if (@($sharedDir).Count -gt 0) {
+        Write-Log -Level WARNING -Message "'$($target.Dir)' is also listed under '$(@($sharedDir)[0].Name)', so only the task '$($target.TaskPath)$($target.TaskName)' is removed. Remove that entry too if the folder should go."
+    }
+    $result = Remove-MonitorInstall -Monitor $target -KeepHistory $KeepHistory -KeepRoot $KeepRoot -TaskOnly:(@($sharedDir).Count -gt 0)
     $left = @(Get-RemovableMonitor -Root $Root -Path $Path -PrevRoot $PrevRoot -PrevPath $PrevPath | Where-Object { $null -ne $_ })
     if (@($left).Count -eq 0 -and (Test-Path -LiteralPath $Root)) {
         if (@(Get-ChildItem -LiteralPath $Root -Force -ErrorAction SilentlyContinue).Count -eq 0) {

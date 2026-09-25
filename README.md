@@ -87,8 +87,9 @@ published record twice a day, and `Install-TelemetryPublisher.ps1` schedules it.
 ```
 
 It asks for the repository, the working copy, the two run times, and the commit identity, takes a personal access
-token at a hidden prompt, and stores it encrypted with machine-scope DPAPI in a file only SYSTEM and Administrators
-can read. The token never reaches the console, the task definition, or the git remote.
+token at a hidden prompt. It is kept twice in the state folder, both files readable by SYSTEM and Administrators
+only: machine-scope DPAPI in `github-token.bin`, and in cleartext in `git-credentials`, which is the copy git's
+own credential helper reads when it pushes. Treat that folder as holding a live token. The token never reaches the console, the task definition, or the git remote.
 
 Each run publishes three things into the working copy:
 

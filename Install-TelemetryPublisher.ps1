@@ -199,7 +199,9 @@ function Set-RepoCredential {
     Add-Content -LiteralPath (Join-Path $RepoPath '.git\config') -Value "`thelper = " -Encoding ASCII
     Add-Content -LiteralPath (Join-Path $RepoPath '.git\config') -Value "`thelper = store --file='$storeForGit'" -Encoding ASCII
     # Ask git what it would actually use, rather than trusting the file we just wrote
-    $probe = "protocol=https`nhost=$($uri.Host)`n`n"
+    # Windows PowerShell prefixes a native command's stdin with a BOM when the console is UTF-8, and git would
+    # read it as part of the first key, so the first line is one git discards.
+    $probe = "capability=`nprotocol=https`nhost=$($uri.Host)`n`n"
     $answer = ''
     try {
         $env:GIT_TERMINAL_PROMPT = '0'
@@ -271,6 +273,10 @@ if (-not (Get-Command git.exe -ErrorAction SilentlyContinue)) {
 
 if (-not (Test-Path -LiteralPath $StateDir)) { New-Item -Path $StateDir -ItemType Directory -Force | Out-Null }
 & icacls.exe "$StateDir" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)(F)" "*S-1-5-32-544:(OI)(CI)(F)" | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Log -Level FAILED -Message "Could not restrict '$StateDir' to SYSTEM and Administrators (icacls exit $LASTEXITCODE). The stored token would be readable by others, so nothing was set up."
+    exit 1
+}
 $null = Move-PreviousState -From $PreviousStateDir -To $StateDir -Names $CarriedStateFiles
 
 $settingsPath = Join-Path $StateDir $SettingsFileName
