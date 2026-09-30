@@ -20,3 +20,4 @@
 "2026-09-29 08:02:03","Morning","ENDPOINT-01","b83b5c8fa601","3047","99.84","5","3","487","674","13297","0","0","0","0","4","Timed out x4; DNS resolution failed x1"
 "2026-09-29 17:15:03","Evening","ENDPOINT-01","b83b5c8fa601","3131","93.2","213","0","404","761","1976","1","2219","2219","0","3","DNS resolution failed x211; Timed out x2"
 "2026-09-30 07:15:02","Morning","ENDPOINT-01","b83b5c8fa601","4762","99.85","7","5","409","536","12550","0","0","0","0","3","Timed out x6; Connection refused or unreachable x1"
+"2026-09-30 17:15:03","Evening","ENDPOINT-01","b83b5c8fa601","3383","89.74","347","19","398","545","15025","2","1969","2105","1","4","DNS resolution failed x343; Timed out x4"
