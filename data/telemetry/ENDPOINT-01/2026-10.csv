@@ -1,0 +1,2 @@
+"WindowEnd_Local","Window","Endpoint","UrlHash","Polls","AvailabilityPercent","FailedPolls","SlowPolls","P50Ms","P95Ms","MaxMs","Outages","LongestOutageSeconds","TotalOutageSeconds","SlowPeriods","BackendAddresses","FailureReasons"
+"2026-10-01 07:15:02","Morning","ENDPOINT-01","b83b5c8fa601","4741","97.17","134","1","416","576","11193","0","0","0","0","3","DNS resolution failed x121; Timed out x13"
