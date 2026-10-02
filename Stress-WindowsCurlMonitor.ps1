@@ -14,7 +14,7 @@ $firstFunc = ($ast.EndBlock.Statements | Where-Object { $_ -is [System.Managemen
 $assigns = $ast.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and $_.Extent.StartLineNumber -lt $firstFunc }
 foreach ($a in $assigns) { if ($a.Left.Extent.Text -ne '$Template_MonitorScript') { Invoke-Expression $a.Extent.Text } }
 $Template_MonitorScript = $template
-foreach ($f in $ast.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst]},$false) | Where-Object { $_.Name -in @('Write-Log','ConvertTo-SafeSiteName','ConvertTo-SecureText','Protect-Secret','Save-SmtpCredential','Remove-SmtpCredential','New-MonitorContent','ConvertTo-MonitorSlug','Get-InstalledMonitor','Get-LegacyInstall','Get-FolderSizeText','Get-RemovableMonitor','Show-RemovableMonitor','Select-RemovableMonitor','Stop-MonitorProcess','Move-MonitorHistory','Remove-MonitorInstall','Invoke-UninstallFlow','Get-PreviousRootMonitor','Move-MonitorToNewRoot','Invoke-RootMove','Register-MonitorTask','Protect-InstallFolder') }) { Invoke-Expression $f.Extent.Text }
+foreach ($f in $ast.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst]},$false) | Where-Object { $_.Name -in @('Write-Log','ConvertTo-SafeSiteName','ConvertTo-SecureText','Protect-Secret','Save-SmtpCredential','Remove-SmtpCredential','New-MonitorContent','ConvertTo-MonitorSlug','Get-InstalledMonitor','Get-LegacyInstall','Get-FolderSizeText','Get-RemovableMonitor','Show-RemovableMonitor','Select-RemovableMonitor','Stop-MonitorProcess','Move-MonitorHistory','Remove-MonitorInstall','Invoke-UninstallFlow','Get-PreviousRootMonitor','Move-MonitorToNewRoot','Invoke-RootMove','Register-MonitorTask','Protect-InstallFolder','Get-TaskScriptFolder','Get-MonitorTask','Get-FolderTaskClash') }) { Invoke-Expression $f.Extent.Text }
 function Write-Log { param($Level,$Message) $script:LastLog = "$Level|$Message" }
 
 $scratch = 'C:\tmp\hst_win_tests'
@@ -36,7 +36,7 @@ $unprotect = { param($c) [Text.Encoding]::UTF8.GetString([Security.Cryptography.
 Check "K1 Protect-Secret from text and from SecureString decrypt to the same secret" ((& $unprotect $cipher) -eq $plainSecret -and (& $unprotect $cipherPlain) -eq $plainSecret)
 $credRt = New-Object System.Management.Automation.PSCredential('svc', (ConvertTo-SecureText -Text $plainSecret))
 Check "K1 ConvertTo-SecureText round-trips unicode and surrogate pairs through PSCredential" ($credRt.GetNetworkCredential().Password -eq $plainSecret -and $credRt.Password.IsReadOnly())
-Check "K1 Protect-Secret rejects an empty text secret" ((& { try { Protect-Secret -PlainText '' ; $false } catch { $true } }))
+Check "K1 Protect-Secret rejects an empty text secret" ((& { try { [void](Protect-Secret -PlainText ''); $false } catch { $true } }))
 $InstallDir = $scratch
 $credPath = Join-Path $scratch $CredentialFileName
 # The file is locked to SYSTEM and Administrators before any content lands in it. Not elevated, this caller is refused
@@ -303,7 +303,9 @@ $monSt = Join-Path $runDir8 'monitor.ps1'
 Set-Content $monSt -Value $genSt -Encoding UTF8
 $nowUtc8 = (Get-Date).ToUniversalTime()
 $onset8 = $nowUtc8.AddMinutes(-20)
-$hb8 = [ordered]@{ Beat = $nowUtc8.AddHours(-3).ToString('o'); IsDown = $true; ConsecutiveFailures = 40; OutageStartUtc = $onset8.ToString('o'); OutageStartLocalStr = $onset8.ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss'); OutageStartUtcStr = $onset8.ToString('yyyy-MM-dd HH:mm:ss'); LastAlertUtc = $onset8.ToString('o'); AlertDelivered = $true; Stopped = $true }
+# The installer's mark covers as long as an install takes, so this is a stop from minutes ago, not days.
+# Stress-InstallCurlMonitor.ps1 R7b covers the long gap, where the notice is raised and names the installer.
+$hb8 = [ordered]@{ Beat = $nowUtc8.AddMinutes(-10).ToString('o'); IsDown = $true; ConsecutiveFailures = 40; OutageStartUtc = $onset8.ToString('o'); OutageStartLocalStr = $onset8.ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss'); OutageStartUtcStr = $onset8.ToString('yyyy-MM-dd HH:mm:ss'); LastAlertUtc = $onset8.ToString('o'); AlertDelivered = $true; Stopped = $true }
 $hb8 | ConvertTo-Json -Compress | Set-Content (Join-Path $runDir8 'heartbeat.json') -Encoding UTF8
 $srv8 = Start-Job -ScriptBlock {
     param($port)
@@ -330,7 +332,7 @@ $srv8 | Wait-Job -Timeout 20 | Out-Null; $srv8 | Remove-Job -Force
 Start-Sleep -Seconds 2
 $stText = (Get-ChildItem $runDir8 -Filter 'Transcript_*.log' | Select-Object -First 1 | Get-Content -Raw)
 $dropM8 = @(Get-Content (Join-Path $runDir8 'Drops.log') -ErrorAction SilentlyContinue)
-Check "M8 deliberate stop: no restart notice after a 3 h gap, outage carried over" ($stText -match 'Monitor restarted after a deliberate stop' -and $stText -match 'outage was in progress at the last heartbeat' -and -not ($stText -cmatch '\[MONITOR RESTARTED\]'))
+Check "M8 deliberate stop: no restart notice while the install was running, outage carried over" ($stText -match 'Monitor restarted after a deliberate stop' -and $stText -match 'outage was in progress at the last heartbeat' -and -not ($stText -cmatch '\[MONITOR RESTARTED\]'))
 Check "M8 deliberate stop: RESOLVED from the 20 min onset with 40 carried polls, DOWN alert marked delivered" ($stText -match '\[RESOLVED\] WinStopped \([^)]+\) - outage lasted 20m [0-2]\ds' -and @($dropM8 | Where-Object { $_ -match '\| RESOLVED  \| Outage record written: WinStopped lasted 20m [0-2]\ds over 40 failed polls' }).Count -eq 1 -and @($dropM8 | Where-Object { $_ -match '\| CARRYOVER \|' }).Count -eq 1 -and @($dropM8 | Where-Object { $_ -match '\| RESTART' }).Count -eq 0)
 
 # M7: crash without a heartbeat gap is quiet, and a fresh install (no heartbeat) sends no notice
@@ -571,6 +573,28 @@ $null = Stop-MonitorProcess -Dir $rDest
 Start-Sleep -Seconds 3
 $rSibAfter = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine -like "*$rSibling*" })
 Check "R live: stopping one monitor leaves a sibling whose folder name starts the same alone" (@($rSibBefore).Count -ge 1 -and @($rSibAfter).Count -eq @($rSibBefore).Count)
+
+# A real monitor in the old location whose settings file has gone: still polling, and the move has to find it
+$rBareName = 'Bare Drill'
+$rBareDir = Join-Path $rOldRoot (ConvertTo-MonitorSlug $rBareName)
+New-Item $rBareDir -ItemType Directory -Force | Out-Null
+$InstallDir = $rBareDir
+$MonitorName = $rBareName
+Set-Content (Join-Path $rBareDir 'Watch-CurlMonitor.ps1') -Value (New-MonitorContent -SiteName 'MoveSite' -Mail $mailDown) -Encoding UTF8
+Register-MonitorTask -Name ($TaskNamePrefix + $rBareName) -Path $uTaskPath -ScriptPath (Join-Path $rBareDir 'Watch-CurlMonitor.ps1')
+Start-ScheduledTask -TaskPath $uTaskPath -TaskName ($TaskNamePrefix + $rBareName)
+Start-Sleep -Seconds 20
+$rBareCsv = @(Get-ChildItem $rBareDir -Filter 'Latency_*.csv' -ErrorAction SilentlyContinue)
+$rBareRows = if ($rBareCsv.Count) { @(Import-Csv $rBareCsv[0].FullName).Count } else { 0 }
+$rBareFound = @(@(Get-PreviousRootMonitor -Root $rOldRoot -Path $uTaskPath -NewRoot $rNewRoot) | Where-Object { $_.Dir -eq $rBareDir })
+Check "R live: a monitor with no settings file is polling and is still found from its task" ($rBareRows -ge 3 -and @($rBareFound).Count -eq 1 -and @($rBareFound)[0].HasTask -and @($rBareFound)[0].Name -eq $rBareName)
+$rBareMoved = Move-MonitorToNewRoot -Monitor @($rBareFound)[0] -NewRoot $rNewRoot -NewTaskPath $uTaskPath
+$rBareDest = Join-Path $rNewRoot (ConvertTo-MonitorSlug $rBareName)
+Start-Sleep -Seconds 20
+$rBareCsv2 = @(Get-ChildItem $rBareDest -Filter 'Latency_*.csv' -ErrorAction SilentlyContinue)
+$rBareRows2 = if ($rBareCsv2.Count) { @(Import-Csv $rBareCsv2[0].FullName).Count } else { 0 }
+Check "R live: it moved and is polling again from the new root" ($rBareMoved -and (Test-Path $rBareDest) -and -not (Test-Path $rBareDir) -and $rBareRows2 -gt $rBareRows)
+Check "R live: nothing else now runs out of the folder it landed in" ((Get-FolderTaskClash -Dir $rBareDest -Path $uTaskPath -Exclude ($TaskNamePrefix + $rBareName)) -eq '')
 
 foreach ($t in @(Get-ScheduledTask -TaskPath $uTaskPath -ErrorAction SilentlyContinue)) { Unregister-ScheduledTask -TaskName $t.TaskName -TaskPath $uTaskPath -Confirm:$false -ErrorAction SilentlyContinue }
 Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and ($_.CommandLine -like "*run_move_new*" -or $_.CommandLine -like "*run_move_old*") } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }

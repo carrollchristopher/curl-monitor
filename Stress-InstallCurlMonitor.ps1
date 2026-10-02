@@ -3,6 +3,11 @@ $script:pass=0; $script:fail=0; $script:failed=@()
 function Check($n,$c){ if($c){$script:pass++} else {$script:fail++; $script:failed += $n; Write-Host "FAIL: $n"} }
 function Section($n){ Write-Host ""; Write-Host "== $n ==" }
 
+# Everything this run writes goes under a folder of its own, so two runs on one machine cannot wipe each other
+$scratchRoot = Join-Path ([IO.Path]::GetTempPath()) "curlmon_stress_$PID"
+if (Test-Path $scratchRoot) { Remove-Item $scratchRoot -Recurse -Force -ErrorAction SilentlyContinue }
+New-Item $scratchRoot -ItemType Directory -Force | Out-Null
+
 $installerPath = Join-Path $PSScriptRoot 'Install-CurlMonitor.ps1'
 $src = Get-Content -Raw -Encoding UTF8 $installerPath
 $T=$null;$E=$null
@@ -53,7 +58,7 @@ $subjectTypes = $subjects | % { ([regex]::Match($_,'\[([A-Z ]+)\]')).Groups[1].V
 Check "Subject set is exactly DAILY/DOWN/MONITOR INSTALLED/MONITOR RESTARTED/MONITOR TEST/RESOLVED/SLOW/SLOW RESOLVED/STILL DOWN/STILL SLOW" ((($subjectTypes -join '|')) -eq 'DAILY|DOWN|MONITOR INSTALLED|MONITOR RESTARTED|MONITOR TEST|RESOLVED|SLOW|SLOW RESOLVED|STILL DOWN|STILL SLOW')
 Check "Every subject carries the site name variable" (($subjects | Where-Object { $_ -notmatch '\$SiteName|\$site' }).Count -eq 0)
 
-Check "Single deliverable: only Install-CurlMonitor.ps1 among installer files" ((Get-ChildItem /mnt/user-data/outputs -Filter '*CurlMonitor*.ps1').Count -eq 1)
+Check "Single deliverable: one installer beside the suite, not two" ((Get-ChildItem $PSScriptRoot -Filter 'Install-*CurlMonitor*.ps1').Count -eq 1)
 Check "No dedicatedit.com or DIT-specific addresses anywhere" (-not ($src -match 'dedicatedit'))
 Check "Sender and recipients have no baked defaults" ($src -match '(?m)^\$MailFrom\s+=\s+""' -and $src -match '(?m)^\$MailTo\s+=\s+@\(\)')
 Check "Policy group derived from sender domain" ($src -match '\$policyGroup = "\$GraphPolicyGroupAlias@" \+')
@@ -80,7 +85,7 @@ Check "Drops log gets failed and slow polls, transitions, alerts, starts, restar
 Check "Drops log is not pruned with the daily transcripts" ($template -match "Filter 'Transcript_\*\.log'" -and $template -match "Drops\.log" -and -not ($template -match "Filter 'HST-eChart-\*"))
 Check "Stored secret offered only for the same Graph app" ($src -match "if \(\`$Saved -and \`$Saved\.MailMethod -eq 'Graph' -and \`$Saved\.CredentialFor -eq \`$client\) \{ Get-StoredSecret \}")
 Check "Installer decrypts the stored secret in one place" (([regex]::Matches($src, 'ProtectedData\]::Unprotect')).Count -eq 2 -and $src -match 'function Get-StoredSecret')
-Check "Analyzer settings file present and names only warning-level style rules" ((Test-Path 'C:\Workspaces\HST Monitor\PSScriptAnalyzerSettings.psd1') -and -not ((Get-Content 'C:\Workspaces\HST Monitor\PSScriptAnalyzerSettings.psd1' -Raw) -match 'SecureString|PlainText|Credential|Password'))
+Check "Analyzer settings file present and names only warning-level style rules" ((Test-Path (Join-Path $PSScriptRoot 'PSScriptAnalyzerSettings.psd1')) -and -not ((Get-Content (Join-Path $PSScriptRoot 'PSScriptAnalyzerSettings.psd1') -Raw) -match 'SecureString|PlainText|Credential|Password'))
 Check "No parameter shadows an automatic variable" (-not ($src -match '(?i)\[string\]\$(Sender|Event|Args|Input|Matches|Error|Host|PID|Profile)'))
 Check "Non-interactive Graph refused (secret needs console)" ($src -match "Graph cannot be configured non-interactively")
 Check "Probe follows redirects with a bounded hop count" ($template -match '-L --max-redirs \$MaxRedirects' -and $src -match '(?m)^\$MaxRedirects\s+=\s+5')
@@ -90,6 +95,11 @@ Check "Task cmdlets stop on error and registration is verified" ($src -match 'Re
 $installTail = $src.Substring($src.IndexOf('$MonitorName = Get-MonitorName'))
 Check "Existing task replaced in place, unregister only for the older install" ((-not ($installTail -match 'Unregister-ScheduledTask')) -and $src -match '(?s)function Invoke-LegacyMigration.*?Unregister-ScheduledTask' -and $src -match 'Register-ScheduledTask[^\n]*-Force')
 Check "Monitor staged as .new and swapped in after verification" ($src -match '\$stagedPath = "\$monitorPath\.new"' -and $src -match 'Move-Item -Path \$stagedPath -Destination \$monitorPath -Force -ErrorAction Stop')
+# powershell.exe reads a file with no byte order mark as the ANSI code page, so an install run under PowerShell 7
+# used to hand the 5.1 runtime a monitor with every non-ASCII character in two pieces.
+Check "The monitor is written with a byte order mark whichever shell wrote it" ($src -match '\[System\.IO\.File\]::WriteAllText\(\$stagedPath, \$content, \(New-Object System\.Text\.UTF8Encoding\(\$true\)\)\)' -and -not ($src -match 'Set-Content -Path \$stagedPath'))
+Check "So does the monitor the move repoints" ($src -match '\[System\.IO\.File\]::WriteAllText\(\$script, \$moved, \(New-Object System\.Text\.UTF8Encoding\(\$true\)\)\)')
+Check "And so does its settings file" ($src -match '\[System\.IO\.File\]::WriteAllText\(\$path, \(\$Settings \| ConvertTo-Json -Depth 3\), \(New-Object System\.Text\.UTF8Encoding\(\$true\)\)\)')
 Check "InstalledAt recorded only after the task is running" ($src -match "(?s)if \(\`$taskState -eq 'Running'\) \{\s*\`$settings\['InstalledAt'\]")
 Check "Monitor failure test includes the curl exit code" ($template -match '\$failed\s+=\s+\(\$result\.CurlExit -ne 0\) -or')
 Check "Latency CSV written after alert dispatch" ($template -match "(?s)Send-AlertOrQueue -Subject \`$decision\.EmailSubject.*?Write-CsvRow -Path \(Get-LatencyCsvPath\) -Row \`$result")
@@ -162,8 +172,22 @@ Check "Interval 0 clamps to 1"      ((ConfigValue $g '$IntervalSeconds') -eq 1)
 Check "Timeout -5 clamps to 1"      ((ConfigValue $g '$TimeoutSeconds') -eq 1)
 $DownThreshold=3; $IntervalSeconds=10; $TimeoutSeconds=15
 $gen = Gen 'CapCity' $mDirect
-Set-Content /tmp/generated_monitor.ps1 $gen
+Set-Content (Join-Path $scratchRoot 'generated_monitor.ps1') $gen
 Check "Generated monitor: Remove-Variable * right after help" ($gen -match '(?s)#>\s*\r?\n\s*\r?\nRemove-Variable \* -ErrorAction SilentlyContinue')
+
+# The stored secret has to be readable from a file somewhere other than this monitor's own folder: that is what
+# lets a migration keep the older install's secret while it is still sitting in the old folder.
+foreach ($f in $ast.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in @('Protect-Secret','Get-StoredSecret')},$false)) { Invoke-Expression $f.Extent.Text }
+$secretDir = Join-Path $scratchRoot 'secret-elsewhere'
+New-Item $secretDir -ItemType Directory -Force | Out-Null
+$secretElsewhere = Join-Path $secretDir 'smtp-credential.bin'
+Set-Content -Path $secretElsewhere -Value (Protect-Secret -PlainText "s3cret-O'Brien") -Encoding ASCII
+$InstallDir = $secretDir
+Set-Content -Path (Join-Path $secretDir 'credential.bin') -Value (Protect-Secret -PlainText 'the-one-here') -Encoding ASCII
+Set-Content -Path (Join-Path $secretDir 'junk.bin') -Value 'not base64 at all' -Encoding ASCII
+Check "S1 the stored secret reads back from this monitor's folder and from a file named outright" ((Get-StoredSecret) -eq 'the-one-here' -and (Get-StoredSecret -Path $secretElsewhere) -eq "s3cret-O'Brien")
+Check "S1 a file that is missing or not a secret reads as no secret, never as an error" ($null -eq (Get-StoredSecret -Path (Join-Path $secretDir 'gone.bin')) -and $null -eq (Get-StoredSecret -Path (Join-Path $secretDir 'junk.bin')))
+Check "S1 the entropy the older installs were written with is unchanged, in the installer and in the monitor it writes" ((([regex]::Matches($src, 'DIT-HSTMonitor-SMTP-v1')).Count -eq 3) -and (([regex]::Matches($template, 'DIT-HSTMonitor-SMTP-v1')).Count -eq 1))
 
 Section "C. Site name, email, recipient, host helpers"
 Check "Safe: strips punctuation" ((ConvertTo-SafeSiteName "O'Brien Site!!") -eq 'OBrien Site')
@@ -171,6 +195,13 @@ Check "Safe: collapses/trims spaces" ((ConvertTo-SafeSiteName '  a   b  ') -eq '
 Check "Safe: keeps dash/underscore" ((ConvertTo-SafeSiteName 'Site_1-A') -eq 'Site_1-A')
 Check "Safe: null -> empty" ((ConvertTo-SafeSiteName $null) -eq '')
 Check "Safe: only junk -> empty" ((ConvertTo-SafeSiteName '!!!') -eq '')
+# A recipient copied out of Outlook arrives as 'Name <a@b.c>', and a mistyped one used to vanish without a word
+$script:cLogs = @()
+function Write-Log { param($Level,$Message) $script:cLogs += "$Level|$Message" }
+$recipients = ConvertTo-RecipientList 'Chris Carroll <a@contoso.com>; bad@@x, d@contoso.org "Quoted Name" <e@contoso.net>'
+function Write-Log { param($Level,$Message) }
+Check "C9 a display-name recipient keeps only the address, and anything that is not one is named" ((((@($recipients) | Sort-Object) -join '|') -eq 'a@contoso.com|d@contoso.org|e@contoso.net') -and (($script:cLogs -join "`n") -match 'Not an email address, so left out: .*bad@@x') -and -not (($script:cLogs -join "`n") -match 'Chris|Quoted'))
+Check "C9 brackets, commas and quotes are never part of an address" (-not (Test-EmailAddress '<a@b.c>') -and -not (Test-EmailAddress 'a@b.c,d@e.f') -and -not (Test-EmailAddress '"a"@b.c') -and (Test-EmailAddress 'a.b-c_d@e.f.gh'))
 Check "Email valid" (Test-EmailAddress 'a.b@c.io')
 Check "Email invalid no @" (-not (Test-EmailAddress 'abc'))
 Check "Email invalid no tld" (-not (Test-EmailAddress 'a@b'))
@@ -209,7 +240,7 @@ Section "D. Monitor functions: extract from generated monitor"
 $gT=$null;$gE=$null
 $gAst=[System.Management.Automation.Language.Parser]::ParseInput($gen,[ref]$gT,[ref]$gE)
 foreach ($f in $gAst.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in @('ConvertTo-Ms','Format-Duration','Get-CurlReason','Get-LatencyCsvPath','Write-CsvRow','Get-TranscriptPath','Update-MonitorState','Get-ProbeResult','Get-SecretExpiryWarning','New-AlertBody','Write-Heartbeat','Read-Heartbeat','Get-RestartNotice','Send-AlertOrQueue','Send-PendingAlert','Wait-NetworkReady','Get-SmtpCredential','ConvertTo-SecureText','Write-DropLog','Update-SlowState','Test-DailySummaryDue','Get-DailySummary','Get-AlertLabel')},$true)) { Invoke-Expression $f.Extent.Text }
-$InstallDir = '/tmp/hstprobe_test'; if (Test-Path $InstallDir){Remove-Item $InstallDir -Recurse -Force}; New-Item $InstallDir -ItemType Directory | Out-Null
+$InstallDir = Join-Path $scratchRoot 'hstprobe_test'; if (Test-Path $InstallDir){Remove-Item $InstallDir -Recurse -Force}; New-Item $InstallDir -ItemType Directory | Out-Null
 
 Check "Ms: 0.123456 -> 123" ((ConvertTo-Ms '0.123456') -eq 123)
 Check "Ms: garbage -> null" ($null -eq (ConvertTo-Ms 'abc'))
@@ -276,6 +307,19 @@ Write-DropLog -Kind 'STOP' -Message 'rotated'
 $asideDrops = @(Get-ChildItem $InstallDir -Filter 'drops_*.log')
 Check "Drops log rotates aside past 10 MB and starts fresh" ($asideDrops.Count -eq 1 -and $asideDrops[0].Length -gt 10MB -and @(Get-Content $DropLog).Count -eq 1 -and (Get-Content $DropLog) -match '\| STOP      \| rotated$')
 function Write-Log { param($Level,$Message) }
+
+$csvDir = Join-Path $scratchRoot 'csv-encoding'
+New-Item $csvDir -ItemType Directory -Force | Out-Null
+$csvPath = Join-Path $csvDir 'Latency_209901.csv'
+Write-CsvRow -Path $csvPath -Row ([PSCustomObject]@{ Timestamp_Local = '2026-10-01 09:00:00'; Url = 'https://x.invalid/caf' + [char]0xE9; Reason = 'sesi' + [char]0xF3 + 'n' })
+Write-CsvRow -Path $csvPath -Row ([PSCustomObject]@{ Timestamp_Local = '2026-10-01 09:01:00'; Url = 'https://x.invalid/caf' + [char]0xE9; Reason = 'a' + [char]0xF1 + 'ejo' })
+$csvBack = @(Import-Csv -Path $csvPath)
+Check "CSV rows keep non-ASCII text instead of storing it as question marks" (@($csvBack).Count -eq 2 -and $csvBack[0].Url -eq ('https://x.invalid/caf' + [char]0xE9) -and $csvBack[0].Reason -eq ('sesi' + [char]0xF3 + 'n') -and $csvBack[1].Reason -eq ('a' + [char]0xF1 + 'ejo'))
+$csvBytes = [IO.File]::ReadAllBytes($csvPath)
+Check "CSV append puts no byte order mark anywhere but the start of the file" (@(1..($csvBytes.Length - 3) | Where-Object { $csvBytes[$_] -eq 0xEF -and $csvBytes[$_+1] -eq 0xBB -and $csvBytes[$_+2] -eq 0xBF }).Count -eq 0)
+
+Check "D9 curl exit 23 reads as this server failing to store the response, not the endpoint failing" ((Get-CurlReason 23) -match 'Could not store the response on this server')
+Check "D9 that poll raises no alert and records no outage: it never reaches the state machine" ($gen -match "(?s)if \(\`$result\.CurlExit -eq 23\) \{.*?Write-Log -Level ERROR.*?Write-DropLog -Kind 'ERROR'.*?Write-CsvRow -Path \(Get-LatencyCsvPath\).*?Write-Heartbeat.*?continue\s*\}" -and $gen.IndexOf('if ($result.CurlExit -eq 23)') -lt $gen.IndexOf('$decision = Update-MonitorState'))
 
 Section "E. State machine"
 function NewState { @{ ConsecutiveFailures=0; IsDown=$false; LastAlertUtc=$null; OutageStartUtc=$null; OutageStartLocalStr=$null; OutageStartUtcStr=$null } }
@@ -395,14 +439,17 @@ Check "R6 clock went backwards -> gap zero, no email" ($n -and $null -eq $n.Subj
 $n = Get-RestartNotice -Previous $hbUp -NowUtc $T0.AddMinutes(20) -GapThresholdSeconds 60 -IntervalSeconds 10 -SiteName 'CapCity' -HostName 'HOST1' -Url 'http://x'
 Check "R7 unknown boot time is stated, not guessed" ($n.Subject -and $n.Body -match 'Could not read the server boot time')
 Check "R7 threshold boundary: gap equal to threshold reports" ((Get-RestartNotice -Previous $hbUp -NowUtc $T0.AddMinutes(11) -GapThresholdSeconds 60 -IntervalSeconds 10 -SiteName 'C' -HostName 'H' -Url 'u').Subject -ne $null)
-# Deliberate stop marked by the installer: no notice however long the gap, outage still carried over
+# A deliberate stop marked by the installer: no notice while the install is running, and the outage carried over.
+# The mark covers as long as an install takes, so a reinstall abandoned 30 hours ago is reported, not excused.
 Write-Heartbeat -State $downState -NowUtc $T0.AddMinutes(10)
 $hbj = Get-Content $HeartbeatFile -Raw | ConvertFrom-Json
 $hbj | Add-Member -NotePropertyName Stopped -NotePropertyValue $true -Force
 $hbj | ConvertTo-Json -Compress | Set-Content -Path $HeartbeatFile -Encoding UTF8 -Force
 $hbStopped = Read-Heartbeat
-$n = Get-RestartNotice -Previous $hbStopped -NowUtc $T0.AddHours(30) -BootTimeUtc $T0.AddHours(-5) -GapThresholdSeconds 60 -IntervalSeconds 10 -SiteName 'CapCity' -HostName 'HOST1' -Url 'http://x'
-Check "R7b deliberate stop: heartbeat flag read back, no notice after 30 h, outage carried" ($hbStopped.Stopped -and $n -and $null -eq $n.Subject -and $n.Stopped -and $n.RestoredState -and $n.RestoredState.OutageStartUtc -eq $T0 -and $n.GapSeconds -eq 107400)
+$n = Get-RestartNotice -Previous $hbStopped -NowUtc $T0.AddMinutes(20) -BootTimeUtc $T0.AddHours(-5) -GapThresholdSeconds 60 -IntervalSeconds 10 -SiteName 'CapCity' -HostName 'HOST1' -Url 'http://x'
+Check "R7b deliberate stop: heartbeat flag read back, no notice while the install runs, outage carried" ($hbStopped.Stopped -and $n -and $null -eq $n.Subject -and $n.Stopped -and $n.RestoredState -and $n.RestoredState.OutageStartUtc -eq $T0 -and $n.GapSeconds -eq 600)
+$nLate = Get-RestartNotice -Previous $hbStopped -NowUtc $T0.AddHours(30) -BootTimeUtc $T0.AddHours(-5) -GapThresholdSeconds 60 -IntervalSeconds 10 -SiteName 'CapCity' -HostName 'HOST1' -Url 'http://x'
+Check "R7b a stop nothing came back from is reported, with the installer named as the cause and the outage still carried" ($null -ne $nLate.Subject -and $nLate.GapSeconds -eq 107400 -and $nLate.Cause -match 'installer stopped the monitor on purpose' -and $nLate.RestoredState -and $nLate.RestoredState.OutageStartUtc -eq $T0)
 Write-Heartbeat -State $downState -NowUtc $T0.AddMinutes(10)
 Check "R7b the monitor's own heartbeat writes Stopped false" (-not (Read-Heartbeat).Stopped)
 Set-Content $HeartbeatFile -Value '{ not json' -Encoding UTF8
@@ -476,7 +523,7 @@ $sw.Restart()
 Check "N1 unresolvable host gives up at the timeout with a warning" (-not (Wait-NetworkReady -Url 'http://nonexistent-host-zz.invalid/' -TimeoutSeconds 1) -and $sw.Elapsed.TotalSeconds -lt 40 -and $script:LastLog -match 'still fails after 1 s')
 Check "N1 real endpoint resolves" (Wait-NetworkReady -Url 'https://prodasp09.hstpathways.com/p95_CSP/HSTeChart' -TimeoutSeconds 10)
 # Static wiring
-Check "Monitor writes a heartbeat before and after each poll" (([regex]::Matches($template, 'Write-Heartbeat -State \$state -NowUtc')).Count -eq 3)
+Check "Monitor writes a heartbeat before and after each poll, and on the poll it could not store" (([regex]::Matches($template, 'Write-Heartbeat -State \$state -NowUtc')).Count -eq 4)
 Check "Monitor waits for name resolution before its first poll" ($template -match 'Wait-NetworkReady -Url \$Url')
 Check "Monitor restart notice threshold is at least 60 s" ($template -match '\[math\]::Max\(60, 2 \* \(\$IntervalSeconds \+ \$TimeoutSeconds\)\)')
 Check "Monitor Graph calls have a 30 s timeout" (([regex]::Matches($template, '-TimeoutSec 30')).Count -eq 2)
@@ -485,6 +532,14 @@ Check "Probe cycle errors reach the drops log" ($template.Contains("Write-DropLo
 Check "Install email skipped when the SMTP password cannot be read back" ($src -match '\$canSend -and \(Send-MailWithConfig')
 Check "Stored secret gated on the credential recorded at the last successful install" ($src -match "\`$Saved\.CredentialFor -eq \`$client\) \{ Get-StoredSecret \}" -and $src -match "\`$settings\['CredentialFor'\] = switch")
 function Write-Log { param($Level,$Message) }
+
+# The installer's deliberate-stop mark covers as long as an install takes, not days
+$stopNow = [datetime]::UtcNow
+$stopBeat = @{ BeatUtc = $stopNow.AddMinutes(-10); IsDown = $false; ConsecutiveFailures = 0; Stopped = $true }
+$stopShort = Get-RestartNotice -Previous ([PSCustomObject]$stopBeat) -NowUtc $stopNow -BootTimeUtc $stopNow.AddDays(-1) -GapThresholdSeconds 120 -IntervalSeconds 30 -SiteName 'S' -HostName 'H' -Url 'https://x' -MonitorName 'M'
+$stopBeat.BeatUtc = $stopNow.AddDays(-3)
+$stopLong = Get-RestartNotice -Previous ([PSCustomObject]$stopBeat) -NowUtc $stopNow -BootTimeUtc $stopNow.AddDays(-4) -GapThresholdSeconds 120 -IntervalSeconds 30 -SiteName 'S' -HostName 'H' -Url 'https://x' -MonitorName 'M'
+Check "R9 a stop the installer made minutes ago raises no notice, and one from days ago does" ($null -eq $stopShort.Subject -and $null -ne $stopLong.Subject -and $stopLong.Body -match 'stopped the monitor on purpose and nothing started it again')
 
 Section "E3. Slow periods and daily summary"
 function SlowRes($ms, $local = 'L', $code = '200', $reason = 'OK') { [PSCustomObject]@{ Timestamp_Local = $local; Timestamp_UTC = 'U'; HttpCode = $code; ContentOk = ($code -eq '200'); RemoteIp = '1.2.3.4'; Reason = $reason; TotalMs = $ms } }
@@ -627,12 +682,24 @@ $DailySummaryHour = -9
 $genOff = New-MonitorContent -SiteName 'S' -Mail $mRelay
 $AlertOnSlow, $SlowWindowMinutes, $SlowAlertPercent, $SlowClearPercent, $DailySummaryHour = $saveSlow
 Check "SL12 settings are clamped: window at least 1, clear below alert, hour 23 or off" ($genClamp -match '(?m)^\$AlertOnSlow\s+=\s+\$false$' -and $genClamp -match '(?m)^\$SlowWindowMinutes\s+=\s+1$' -and $genClamp -match '(?m)^\$SlowAlertPercent\s+=\s+5$' -and $genClamp -match '(?m)^\$SlowClearPercent\s+=\s+4$' -and $genClamp -match '(?m)^\$DailySummaryHour\s+=\s+23$' -and $genOff -match '(?m)^\$DailySummaryHour\s+=\s+-1$' -and (ParseOk $genClamp))
-Check "SL13 loop evaluates slowness after the outage decision, gated emails, heartbeat carries it" ($template -match '(?s)\$decision = Update-MonitorState.*?\$slow = Update-SlowState -State \$slowState -Result \$result -Failed \$failed -IsDown \$state\.IsDown' -and $template -match 'if \(\$SendEmail -and \$AlertOnSlow -and \$slow\.EmailSubject\)' -and ([regex]::Matches($template, 'Write-Heartbeat -State \$state -NowUtc [^\r\n]*-SlowState \$slowState')).Count -eq 3 -and $template -match 'Write-DropLog -Kind \$slow\.DropKind -Message \$slow\.TransitionLog')
-Check "SL13 daily summary reads the drops log once a day and records the date first" ($template -match '(?s)if \(Test-DailySummaryDue -NowLocal \(Get-Date\) -Hour \$DailySummaryHour -LastSentDate \$summarySent\) \{\s+\$summarySent = \(Get-Date\)\.ToString\(''yyyy-MM-dd''\)\s+try \{ Set-Content -Path \$SummaryStateFile' -and $template -match "Send-AlertOrQueue -Subject \`$summary\.Subject -Body \`$summary\.Body -Kind 'Summary'")
+Check "SL13 loop evaluates slowness after the outage decision, gated emails, heartbeat carries it" ($template -match '(?s)\$decision = Update-MonitorState.*?\$slow = Update-SlowState -State \$slowState -Result \$result -Failed \$failed -IsDown \$state\.IsDown' -and $template -match 'if \(\$SendEmail -and \$AlertOnSlow -and \$slow\.EmailSubject\)' -and ([regex]::Matches($template, 'Write-Heartbeat -State \$state -NowUtc [^\r\n]*-SlowState \$slowState')).Count -eq 4 -and $template -match 'Write-DropLog -Kind \$slow\.DropKind -Message \$slow\.TransitionLog')
+Check "SL13 daily summary reads the drops log once a day and records the date first" ($template -match '(?s)if \(Test-DailySummaryDue -NowLocal \(Get-Date\) -Hour \$DailySummaryHour -LastSentDate \$summarySent\) \{\s+\$summarySent = \(Get-Date\)\.ToString\(''yyyy-MM-dd''\)\s+\$summaryDateRecorded = \$false\s+try \{ Set-Content -Path \$SummaryStateFile' -and $template -match '(?s)if \(-not \$summaryDateRecorded -and \$summarySent\) \{\s+try \{ Set-Content -Path \$SummaryStateFile' -and $template -match "Send-AlertOrQueue -Subject \`$summary\.Subject -Body \`$summary\.Body -Kind 'Summary'")
 Check "SL13 slow period carried over at startup unless an outage is" ($template -match 'if \(\$previous -and \$previous\.IsSlow -and \$null -ne \$previous\.SlowStartUtc -and -not \$state\.IsDown\)')
 Check "SL13 alert settings normalised before the first function, so the summary text matches the monitor" ($src -match '(?m)^\$DownThreshold\s+=\s+\[math\]::Max\(1, \[int\]\$DownThreshold\)$' -and $src -match '(?m)^\$SlowWindowMinutes\s+=\s+\[math\]::Max\(1, \[int\]\$SlowWindowMinutes\)$' -and $src -match '(?m)^\$SlowAlertPercent\s+=\s+\[math\]::Min\(100, \[math\]::Max\(1, \[int\]\$SlowAlertPercent\)\)$' -and $src -match '(?m)^\$SlowClearPercent\s+=\s+\[math\]::Max\(0, \[math\]::Min\(\[int\]\$SlowClearPercent, \$SlowAlertPercent - 1\)\)$' -and $src -match '(?m)^\$DailySummaryHour\s+=\s+\[math\]::Min\(23, \[math\]::Max\(-1, \[int\]\$DailySummaryHour\)\)$' -and $src.IndexOf('$DailySummaryHour      = [math]::Min(23') -lt $src.IndexOf('function Write-Log'))
 Check "SL13 heartbeat replace retried three times before warning" ($template -match '(?s)for \(\$attempt = 1; -not \$moved; \$attempt\+\+\) \{\s+try \{ Move-Item -Path \$tmp -Destination \$HeartbeatFile -Force -ErrorAction Stop; \$moved = \$true \}\s+catch \{ if \(\$attempt -ge 3\) \{ throw \}; Start-Sleep -Milliseconds 200 \}')
 Check "SL13 installer summary and install email describe the alert rules" ($src -match 'Write-Host "  Slow alert      : ' -and $src -match "'Slow alert' = " -and $src -match "'Daily summary' = ")
+
+# Lines the monitor could not write are lines the summary never saw, and it used to under-report in silence
+$lostLines = @(
+  "$((Get-Date).AddHours(-2).ToString('yyyy-MM-dd HH:mm:ss')) | LOST      | 7 line(s) were not recorded while this file was locked by another program.",
+  "$((Get-Date).AddHours(-1).ToString('yyyy-MM-dd HH:mm:ss')) | FAIL      | Site=S Code=000 Reason=Timed out"
+)
+$lostSummary = Get-DailySummary -Lines $lostLines -NowLocal (Get-Date) -SlowThresholdMs 3000 -SiteName 'S' -HostName 'H' -Url 'https://x' -MonitorName 'M'
+Check "E4 the summary says the counts are short when drops-log lines were lost" ($null -ne $lostSummary -and $lostSummary.Body -match '7 line\(s\) could not be written' -and $lostSummary.Body -match 'at least this much short')
+$lostOnly = Get-DailySummary -Lines @($lostLines[0]) -NowLocal (Get-Date) -SlowThresholdMs 3000 -SiteName 'S' -HostName 'H' -Url 'https://x' -MonitorName 'M'
+Check "E4 a day whose only event was lost lines still reports rather than staying silent" ($null -ne $lostOnly -and $lostOnly.Body -match '7 line\(s\) could not be written')
+$quietDay = Get-DailySummary -Lines @("$((Get-Date).AddHours(-1).ToString('yyyy-MM-dd HH:mm:ss')) | STARTED   | fine") -NowLocal (Get-Date) -SlowThresholdMs 3000 -SiteName 'S' -HostName 'H' -Url 'https://x' -MonitorName 'M'
+Check "E4 a day on which nothing went wrong still sends nothing" ($null -eq $quietDay)
 
 Section "F. Live probe via curl.exe shim"
 $SiteName='T'; $ExpectedContentMarker=''; $MinPopulatedBytes=100; $TimeoutSeconds=10
@@ -701,9 +768,14 @@ function Read-Setting { param([string]$Prompt,[string]$Default="") if ($NonInter
 function Read-Choice { param([string]$Prompt,[string[]]$Allowed,[string]$Default) if ($NonInteractive){return $Default}; while ($true) { $a = NextAnswer $Prompt; if ([string]::IsNullOrWhiteSpace($a)) { return $Default }; $a=$a.Trim().ToUpper(); if ($Allowed -contains $a) { return $a } } }
 function Read-Host { param([string]$Prompt,[switch]$AsSecureString) $a = NextAnswer $Prompt; if ($AsSecureString) { if ($a) { return (ConvertTo-SecureString $a -AsPlainText -Force) } else { return (New-Object System.Security.SecureString) } }; return $a }
 function Get-DirectSendHost { param($FromAddress) [PSCustomObject]@{ Host='contoso-com.mail.protection.outlook.com'; Source='stub' } }
-function Protect-Secret { param($Password,$PlainText) $script:LastPlainText = $PlainText; return 'CIPHER' }
+$script:SeenPlainText = @()
+function Protect-Secret { param($Password,$PlainText) $script:LastPlainText = $PlainText
+  if ($PlainText) { $script:SeenPlainText += $PlainText }
+  if ($Password) { $script:SeenPlainText += [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password)) }
+  return 'CIPHER' }
 $script:StoredSecretForWizard = $null
-function Get-StoredSecret { return $script:StoredSecretForWizard }
+$script:LegacySecretForWizard = $null
+function Get-StoredSecret { param([string]$Path = "") if ($Path) { return $script:LegacySecretForWizard }; return $script:StoredSecretForWizard }
 $script:SavedMid = $null
 function Save-InstallSettings { param($Settings) $script:SavedMid = $Settings }
 function Get-Credential { param($UserName,$Message) New-Object System.Management.Automation.PSCredential($UserName,(ConvertTo-SecureString 'pw' -AsPlainText -Force)) }
@@ -727,7 +799,10 @@ Check "W1 test subject names site and server" ($script:SentSubjects[-1] -eq "[MO
 $saved = [PSCustomObject]@{ MailMethod='Graph'; SmtpServer='graph.microsoft.com'; SmtpPort=443; SmtpUseSsl=$true; MailFrom='hst@contoso.com'; MailTo=@('a@contoso.com','b@contoso.com'); SmtpAuthUser=''; GraphTenantId=$T; GraphClientId=$C; GraphSecretExpires='2028-01-01'; CredentialFor=$C }
 Push @('','','','','','','s3cret','','')
 $m = Get-MailConfiguration -Saved $saved -SiteName 'S'
-Check "W2 saved settings prefill everything" ($m.MailFrom -eq 'hst@contoso.com' -and $m.MailTo.Count -eq 2 -and $m.GraphTenantId -eq $T -and $m.GraphClientId -eq $C -and $m.GraphSecretExpires -eq '2028-01-01')
+Check "W2 saved settings prefill everything, and a pasted secret is not given the saved expiry date" ($m.MailFrom -eq 'hst@contoso.com' -and $m.MailTo.Count -eq 2 -and $m.GraphTenantId -eq $T -and $m.GraphClientId -eq $C -and $m.GraphSecretExpires -eq '' -and $script:PromptLog[7] -eq 'Secret expiry date yyyy-MM-dd (blank = no expiry warnings)')
+Push @('','','','','','','s3cret','2029-02-03','')
+$m = Get-MailConfiguration -Saved $saved -SiteName 'S'
+Check "W2 and the date typed for the pasted secret is the one kept" ($m.GraphSecretExpires -eq '2029-02-03')
 Check "W2 hasApp defaulted to Y when saved IDs exist" ($script:PromptLog[3] -match 'already been created' -and $m.GraphTenantId -eq $T)
 Check "W2 9 prompts, all Enter except secret" ($script:PromptCount -eq 9)
 Check "W2 no stored secret -> plain paste prompt" ($script:PromptLog[6] -eq 'Client secret (paste, input hidden)')
@@ -736,7 +811,7 @@ Check "W2 no stored secret -> plain paste prompt" ($script:PromptLog[6] -eq 'Cli
 $script:StoredSecretForWizard = 'stored~secret'
 Push @('','','','','','','','','')
 $m = Get-MailConfiguration -Saved $saved -SiteName 'S'
-Check "W20 Enter keeps the stored secret" ($m.MailMethod -eq 'Graph' -and $script:LastGraphSecret -eq 'stored~secret' -and $script:LastPlainText -eq 'stored~secret' -and $script:PromptCount -eq 9 -and $script:PromptLog[6] -match '^Client secret \(Enter = keep')
+Check "W20 Enter keeps the stored secret, and keeps the expiry date that belongs to it" ($m.MailMethod -eq 'Graph' -and $script:LastGraphSecret -eq 'stored~secret' -and $script:LastPlainText -eq 'stored~secret' -and $script:PromptCount -eq 9 -and $script:PromptLog[6] -match '^Client secret \(Enter = keep' -and $m.GraphSecretExpires -eq '2028-01-01' -and $script:PromptLog[7] -match '^Secret expiry date yyyy-MM-dd \(Enter = keep')
 # W21 a pasted secret wins over the stored one
 Push @('','','','','','','fresh~secret','','')
 $m = Get-MailConfiguration -Saved $saved -SiteName 'S'
@@ -756,6 +831,27 @@ $savedAbandoned = [PSCustomObject]@{ MailMethod='Graph'; SmtpServer='graph.micro
 Push @('','','','','','','','s3cret','','Y')
 $m = Get-MailConfiguration -Saved $savedAbandoned -SiteName 'S'
 Check "W24 no CredentialFor in saved settings -> stored secret not offered" ($script:LastGraphSecret -eq 's3cret' -and $script:PromptCount -eq 10 -and $script:PromptLog[6] -eq 'Client secret (paste, input hidden)')
+# W25 migrating the older layout: its secret is still in its own folder, so Enter keeps it and Entra is not needed
+$script:StoredSecretForWizard = $null
+$script:LegacySecretForWizard = 'legacy~secret'
+Push @('','','','','','','','','')
+$m = Get-MailConfiguration -Saved $saved -SiteName 'S' -LegacySecretPath 'C:\old\smtp-credential.bin'
+Check "W25 the secret the older install stored is offered, so none has to be pasted again" ($m.MailMethod -eq 'Graph' -and $script:LastGraphSecret -eq 'legacy~secret' -and $script:LastPlainText -eq 'legacy~secret' -and $script:PromptCount -eq 9 -and $script:PromptLog[6] -match '^Client secret \(Enter = keep')
+Push @('','','','','',$C,'','s3cret','','Y')
+$m = Get-MailConfiguration -Saved $savedOther -SiteName 'S' -LegacySecretPath 'C:\old\smtp-credential.bin'
+Check "W25 it is still only offered for the app the saved settings name" ($script:LastGraphSecret -eq 's3cret' -and $script:PromptLog[6] -eq 'Client secret (paste, input hidden)')
+# The oldest layout was installed before CredentialFor was recorded, and that is the layout this has to serve
+$savedNoCredentialFor = [PSCustomObject]@{ MailMethod='Graph'; SmtpServer='graph.microsoft.com'; SmtpPort=443; SmtpUseSsl=$true; MailFrom='hst@contoso.com'; MailTo=@('a@contoso.com'); SmtpAuthUser=''; GraphTenantId=$T; GraphClientId=$C; GraphSecretExpires='2028-01-01' }
+Push @('','','','','','','','','')
+$m = Get-MailConfiguration -Saved $savedNoCredentialFor -SiteName 'S' -LegacySecretPath 'C:\old\smtp-credential.bin'
+Check "W25 settings with no CredentialFor still keep the secret stored beside them" ($script:LastGraphSecret -eq 'legacy~secret' -and $script:PromptCount -eq 9 -and $script:PromptLog[6] -match '^Client secret \(Enter = keep')
+$savedAuthLegacy = [PSCustomObject]@{ MailMethod='Authenticated'; SmtpServer='mail.internal.local'; SmtpPort=25; SmtpUseSsl=$false; MailFrom='svc@contoso.com'; MailTo=@('a@contoso.com'); SmtpAuthUser='svc@contoso.com'; CredentialFor='svc@contoso.com' }
+$script:LegacySecretForWizard = 'legacy~password'
+$script:SeenPlainText = @()
+Push @('','','','','','','','Y','Y')
+$m = Get-MailConfiguration -Saved $savedAuthLegacy -SiteName 'S' -LegacySecretPath 'C:\old\smtp-credential.bin'
+Check "W25 an SMTP password the older install stored is kept the same way" ($m.MailMethod -eq 'Authenticated' -and $m.SmtpAuthUser -eq 'svc@contoso.com' -and $m.CipherText -eq 'CIPHER' -and @($script:SeenPlainText | Where-Object { $_ -eq 'legacy~password' }).Count -eq 2 -and @($script:PromptLog | Where-Object { $_ -match 'Keep the stored password' }).Count -eq 1 -and @($script:PromptLog | Where-Object { $_ -match 'Password for' }).Count -eq 0)
+$script:LegacySecretForWizard = $null
 $script:StoredSecretForWizard = $null
 
 # W3 Graph, create path (N): no Tenant/Client/expiry/secret prompts afterwards
@@ -886,7 +982,7 @@ $savedGraph = [PSCustomObject]@{ MailMethod='Graph'; SmtpServer='graph.microsoft
 $script:SendPlan.Clear(); $script:SendPlan.Enqueue($false)
 Push @('2','','','','R','1','','','','','','s3cret','','Y')
 $m = Get-MailConfiguration -Saved $savedGraph -SiteName 'S'
-Check "W15 Graph IDs kept after a Direct Send detour, app not re-created" ($m.MailMethod -eq 'Graph' -and $m.GraphTenantId -eq $T -and $m.GraphClientId -eq $C -and $m.GraphSecretExpires -eq '2027-01-01' -and $script:CreateCalls -eq 0 -and $script:PromptCount -eq 14 -and $script:PromptLog[8] -match 'already been created')
+Check "W15 Graph IDs kept after a Direct Send detour, app not re-created" ($m.MailMethod -eq 'Graph' -and $m.GraphTenantId -eq $T -and $m.GraphClientId -eq $C -and $m.GraphSecretExpires -eq '' -and $script:CreateCalls -eq 0 -and $script:PromptCount -eq 14 -and $script:PromptLog[8] -match 'already been created')
 
 # W16 a saved expiry can be cleared with '-'
 Push @('1','','','','','','s3cret','-','Y')
@@ -1248,7 +1344,7 @@ foreach ($f in $ast.FindAll({param($n) $n -is [System.Management.Automation.Lang
 $NonInteractive = $false; $MonitorNameOverride = ''; $Url = ''; $ExpectedContentMarker = ''
 function Write-Log { param($Level,$Message) $script:LastLog = "$Level|$Message"; $script:Logs += "$Level|$Message" }
 $script:Logs = @()
-$kRoot = '/tmp/curlmon_test'
+$kRoot = Join-Path $scratchRoot 'curlmon_test'
 if (Test-Path $kRoot) { Remove-Item $kRoot -Recurse -Force }
 New-Item $kRoot -ItemType Directory | Out-Null
 $InstallRoot = $kRoot
@@ -1271,6 +1367,21 @@ $m2 = Get-MonitorName -SavedDefault '' -Existing @()
 Check "K3 a name with no letters or digits is refused" ($m2 -eq 'HST eChart')
 Push @('')
 Check "K3 Enter takes the only monitor already installed" ((Get-MonitorName -SavedDefault '' -Existing @([PSCustomObject]@{ Name = 'HST eChart'; Url = 'https://x' })) -eq 'HST eChart')
+# '___' survives the name cleanup but its folder form is empty, which used to point the install at the root
+$kNoSlug = @()
+foreach ($bad in @('___', '-_-', '  _  ')) { $kNoSlug += (ConvertTo-MonitorSlug (ConvertTo-SafeSiteName $bad)) }
+$kSavedNI = $NonInteractive; $kSavedOverride = $MonitorNameOverride; $kSavedName = $MonitorName
+# This section's own log capture is already in place, so borrow it rather than replacing it
+$kLogsSaved = @($script:Logs)
+$script:Logs = @()
+$NonInteractive = $true; $MonitorNameOverride = '___'; $MonitorName = ''
+$kOverrideBad = Get-MonitorName -SavedDefault '' -Existing @() -Elsewhere @()
+$MonitorNameOverride = ''; $MonitorName = '___'
+$kSilentBad = Get-MonitorName -SavedDefault '' -Existing @() -Elsewhere @()
+$NonInteractive = $kSavedNI; $MonitorNameOverride = $kSavedOverride; $MonitorName = $kSavedName
+$kLogs = @($script:Logs)
+$script:Logs = $kLogsSaved
+Check "K3 a name whose folder form is empty is refused, by override and by a silent run" ((@($kNoSlug) -join '|') -eq '||' -and $kOverrideBad -eq '' -and $kSilentBad -eq '' -and @(@($kLogs) | Where-Object { $_ -match 'no letter or digit in it, so it names no folder of its own' }).Count -eq 2)
 
 Push @('')
 Check "K4 Enter keeps the saved content marker" ((Get-ContentMarker -SavedDefault 'Sign In') -eq 'Sign In')
@@ -1340,6 +1451,35 @@ $legacy2 = Get-LegacyInstall -Dir $legacyDir2 -TaskName 'No Such Curl Task' -Pat
 $migrated2 = Invoke-LegacyMigration -Legacy $legacy2 -Destination $newDir2
 $blocker.Close()
 Check "K9 a file that will not copy keeps the old folder and says so" (-not $migrated2 -and (Test-Path $legacyDir2) -and (($script:Logs -join "`n") -match "did not copy, so '.*old-HSTProbe2' is left in place"))
+
+# Two outage files with one row each match to the byte. Skipping the old one and then deleting its folder lost it.
+$legacyDir3 = Join-Path $kRoot 'old-HSTProbe3'
+$newDir3 = Join-Path $kRoot 'HST-eChart-samesize'
+New-Item $legacyDir3 -ItemType Directory | Out-Null
+New-Item $newDir3 -ItemType Directory | Out-Null
+@{ SiteName = 'CapCity'; Url = 'https://legacy3.example.com/x' } | ConvertTo-Json | Set-Content (Join-Path $legacyDir3 'install-settings.json') -Encoding UTF8
+$oldOutage = '"CapCity","2026-09-15 06:16:14","40"'
+$newOutage = '"CapCity","2026-09-27 21:03:08","70"'
+[IO.File]::WriteAllText((Join-Path $legacyDir3 'HST-eChart-Outages.csv'), $oldOutage, [Text.Encoding]::ASCII)
+[IO.File]::WriteAllText((Join-Path $newDir3 'Outages.csv'), $newOutage, [Text.Encoding]::ASCII)
+$sameLen = ((Get-Item (Join-Path $legacyDir3 'HST-eChart-Outages.csv')).Length -eq (Get-Item (Join-Path $newDir3 'Outages.csv')).Length)
+(Get-Item (Join-Path $newDir3 'Outages.csv')).LastWriteTimeUtc = [datetime]::UtcNow
+$script:Logs = @()
+$migrated3 = Invoke-LegacyMigration -Legacy (Get-LegacyInstall -Dir $legacyDir3 -TaskName 'No Such Curl Task' -Path '\CurlMonitor\') -Destination $newDir3
+$landed3 = @(Get-ChildItem $newDir3 -File | Where-Object { (Get-Content $_.FullName -Raw) -match '2026-09-15 06:16:14' })
+Check "K9 a legacy file the same length as a newer one is still carried, not dropped with the old folder" ($sameLen -and $migrated3 -and -not (Test-Path $legacyDir3) -and @($landed3).Count -eq 1 -and ((Get-Content (Join-Path $newDir3 'Outages.csv') -Raw) -match '2026-09-27 21:03:08'))
+
+# A file that really is identical is still left alone rather than copied in beside itself
+$legacyDir4 = Join-Path $kRoot 'old-HSTProbe4'
+$newDir4 = Join-Path $kRoot 'HST-eChart-identical'
+New-Item $legacyDir4 -ItemType Directory | Out-Null
+New-Item $newDir4 -ItemType Directory | Out-Null
+@{ SiteName = 'CapCity'; Url = 'https://legacy4.example.com/x' } | ConvertTo-Json | Set-Content (Join-Path $legacyDir4 'install-settings.json') -Encoding UTF8
+[IO.File]::WriteAllText((Join-Path $legacyDir4 'HST-eChart-Outages.csv'), $oldOutage, [Text.Encoding]::ASCII)
+[IO.File]::WriteAllText((Join-Path $newDir4 'Outages.csv'), $oldOutage, [Text.Encoding]::ASCII)
+$script:Logs = @()
+$migrated4 = Invoke-LegacyMigration -Legacy (Get-LegacyInstall -Dir $legacyDir4 -TaskName 'No Such Curl Task' -Path '\CurlMonitor\') -Destination $newDir4
+Check "K9 a byte-identical file is left alone, so a second migration carries nothing in twice" ($migrated4 -and @(Get-ChildItem $newDir4 -File -Filter '*Outages*').Count -eq 1 -and (($script:Logs -join "`n") -match 'left 1 already here alone'))
 # A destination file that is locked or already newer is never overwritten: the legacy copy lands beside it
 $legacyDir3 = Join-Path $kRoot 'old-HSTProbe3'
 New-Item $legacyDir3 -ItemType Directory | Out-Null
@@ -1356,7 +1496,7 @@ $InstallRoot = 'C:\ProgramData\CurlMonitor'
 
 
 Section "L. Fixes from the stress campaign"
-$TaskNamePrefix = 'Curl Monitor - '; $MaxTaskNameLength = 238
+$TaskNamePrefix = 'Curl Monitor - '; $MaxTaskNameLength = [math]::Max(1, 256 - ((Join-Path $env:SystemRoot 'System32\Tasks') + '\CurlMonitor\').Length)
 $lExisting = @([PSCustomObject]@{ Name = 'HST eChart'; Slug = 'HST-eChart'; Path = 'C:\x\HST-eChart'; Url = 'u' }, [PSCustomObject]@{ Name = 'Portal'; Slug = 'Portal'; Path = 'C:\x\Portal'; Url = 'v' })
 Check "L1 a name that cleans to another monitor's folder is reported, whatever the punctuation or case" ((Get-SlugClash -Name 'HST_eChart' -Existing $lExisting).Name -eq 'HST eChart' -and (Get-SlugClash -Name 'hst echart' -Existing $lExisting).Name -eq 'HST eChart' -and (Get-SlugClash -Name 'HST.eChart' -Existing $lExisting).Name -eq 'HST eChart')
 Check "L1 the same name and an unrelated name are not clashes" ($null -eq (Get-SlugClash -Name 'HST eChart' -Existing $lExisting) -and $null -eq (Get-SlugClash -Name 'Billing Portal' -Existing $lExisting))
@@ -1463,7 +1603,7 @@ Check "M1 the monitor still records outages, slow periods, and the drops log whe
 Check "M1 installer skips the mail wizard, the credential, and the install email when alerts are off" ($src -match 'if \(\$AlertsEnabled\) \{\s*\r?\n\s*\$mail = Get-MailConfiguration' -and $src -match "MailMethod = 'None'" -and $src -match 'if \(\$SendInstallTestEmail -and \$AlertsEnabled\)' -and $src -match 'Alerts          : off, telemetry only')
 
 # Publisher functions, loaded from the real script
-$pubPath = 'C:\Workspaces\HST Monitor\Publish-UptimeTelemetry.ps1'
+$pubPath = Join-Path $PSScriptRoot 'Publish-UptimeTelemetry.ps1'
 $pubAst = [System.Management.Automation.Language.Parser]::ParseFile($pubPath, [ref]$null, [ref]$null)
 foreach ($f in $pubAst.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst]}, $false)) { Invoke-Expression $f.Extent.Text }
 $ReadmeStartMarker = '<!-- telemetry:start -->'
@@ -1479,7 +1619,7 @@ foreach ($i in 1..10) { $rows += TRow $W0.AddMinutes(-$i) (100 * $i) }
 $rows += TRow $W0.AddMinutes(-11) '' '000' 'False' 'Timed out' ''
 $rows += TRow $W0.AddMinutes(-12) '' '503' 'False' 'HTTP 503' '10.0.0.2'
 $rows += TRow $W0.AddMinutes(-13) 4200
-$outs = @([PSCustomObject]@{ OutageStart_Local = $W0.AddMinutes(-12).ToString('yyyy-MM-dd HH:mm:ss'); DurationSeconds = '95' }, [PSCustomObject]@{ OutageStart_Local = $Wfrom.AddHours(-3).ToString('yyyy-MM-dd HH:mm:ss'); DurationSeconds = '900' })
+$outs = @([PSCustomObject]@{ OutageStart_Local = $W0.AddMinutes(-12).ToString('yyyy-MM-dd HH:mm:ss'); OutageEnd_Local = $W0.AddMinutes(-10).ToString('yyyy-MM-dd HH:mm:ss'); DurationSeconds = '95' }, [PSCustomObject]@{ OutageStart_Local = $Wfrom.AddHours(-3).ToString('yyyy-MM-dd HH:mm:ss'); OutageEnd_Local = $Wfrom.AddHours(-2).ToString('yyyy-MM-dd HH:mm:ss'); DurationSeconds = '900' })
 $drops = @("$($W0.AddMinutes(-13).ToString('yyyy-MM-dd HH:mm:ss')) | SLOWSTART | Declared SLOW", "$($Wfrom.AddHours(-2).ToString('yyyy-MM-dd HH:mm:ss')) | SLOWSTART | older", "garbage")
 $st = Get-TelemetryStat -Rows $rows -Outages $outs -DropLines $drops -From $Wfrom -To $W0 -SlowThresholdMs 3000
 Check "M2 statistics match the hand-computed window" ($st.Polls -eq 13 -and $st.FailedPolls -eq 2 -and $st.AvailabilityPercent -eq 84.62 -and $st.SlowPolls -eq 1 -and $st.MaxMs -eq 4200 -and $st.P50Ms -eq 600 -and $st.BackendAddresses -eq 1 -and $st.Outages -eq 1 -and $st.LongestOutageSeconds -eq 95 -and $st.TotalOutageSeconds -eq 95 -and $st.SlowPeriods -eq 1)
@@ -1504,6 +1644,22 @@ Set-Content (Join-Path $mDir 'Drops.log') -Value "2026-09-21 07:00:00 | SLOWSTAR
 Set-Content (Join-Path $mDir 'Drops_20260920_120000.log') -Value "2026-09-21 02:00:00 | SLOWSTART | rotated"
 $dl = Get-DropLine -Folder $mDir -From ([datetime]'2026-09-21T00:00:00')
 Check "M3 rotated drops logs inside the window are read as well as the current one" (@($dl | Where-Object { $_ -match 'rotated' }).Count -eq 1 -and @($dl | Where-Object { $_ -match 'current' }).Count -eq 1)
+
+# A window left unpublished for a while spans more than two months, and the months in between hold most of it
+$gapDir = Join-Path $tRoot 'monitor-gap'
+New-Item $gapDir -ItemType Directory | Out-Null
+foreach ($gm in @('202606','202607','202608','202609')) {
+  [IO.File]::WriteAllLines((Join-Path $gapDir "Latency_$gm.csv"), [string[]]@($hdr, ('"' + $gm.Substring(0,4) + '-' + $gm.Substring(4,2) + '-15 12:00:00","200","True","120","OK","10.0.0.1"')))
+}
+$gapRows = @(Get-TelemetryRow -Folder $gapDir -From ([datetime]'2026-06-01T00:00:00') -To ([datetime]'2026-09-20T00:00:00'))
+Check "M3 a window spanning several months reads every month in it, not only the two ends" (@($gapRows).Count -eq 4 -and @(@($gapRows) | Where-Object { $_.Timestamp_Local -eq '2026-07-15 12:00:00' }).Count -eq 1 -and @(@($gapRows) | Where-Object { $_.Timestamp_Local -eq '2026-08-15 12:00:00' }).Count -eq 1)
+
+# The monitor writes an outage row when the endpoint comes back, so an outage running across a publish time is
+# only on disk for the window it ended in. Choosing it by its start time dropped it from both.
+$crossOut = @([PSCustomObject]@{ OutageStart_Local = $Wfrom.AddMinutes(-30).ToString('yyyy-MM-dd HH:mm:ss'); OutageEnd_Local = $Wfrom.AddMinutes(30).ToString('yyyy-MM-dd HH:mm:ss'); DurationSeconds = '3600' })
+$crossEarly = Get-TelemetryStat -Rows @() -Outages $crossOut -DropLines @() -From $Wfrom.AddHours(-12) -To $Wfrom -SlowThresholdMs 3000
+$crossLate = Get-TelemetryStat -Rows @() -Outages $crossOut -DropLines @() -From $Wfrom -To $W0 -SlowThresholdMs 3000
+Check "M3 an outage running across a publish time is counted once, in the window it ended in" ($crossEarly.Outages -eq 0 -and $crossLate.Outages -eq 1 -and $crossLate.TotalOutageSeconds -eq 3600 -and $crossLate.LongestOutageSeconds -eq 3600)
 
 # Codes, README markers, commit text, report
 $map = @{}
@@ -1600,7 +1756,7 @@ $rc5 = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $pubPath -RepoP
 Check "M9 a dry run commits nothing and puts the working copy back, so a later run cannot commit its files" ([int](& git.exe -C $dryWork rev-list --count HEAD) -eq $dryBefore -and (($rc5 -join ' ') -match 'produced and then put back') -and -not ((& git.exe -C $dryWork status --porcelain) -join ''))
 
 # The publisher installer, driven into scratch paths, never reaching GitHub
-$pubInstaller = 'C:\Workspaces\HST Monitor\Install-TelemetryPublisher.ps1'
+$pubInstaller = Join-Path $PSScriptRoot 'Install-TelemetryPublisher.ps1'
 $instState = Join-Path $tRoot 'installer-state'
 $taskPathTest = '\CurlMonitorTest\'
 $taskNameTest = 'Curl Monitor telemetry publisher test'
@@ -1625,7 +1781,7 @@ Remove-Item $tRoot -Recurse -Force -ErrorAction SilentlyContinue
 
 
 Section "U. Uninstall: listing, selection, removal, and the broken shapes"
-foreach ($f in $ast.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in @('Get-FolderSizeText','Get-RemovableMonitor','Show-RemovableMonitor','Select-RemovableMonitor','Stop-MonitorProcess','Move-MonitorHistory','Remove-MonitorInstall','Invoke-UninstallFlow','Get-PreviousRootMonitor','Move-MonitorToNewRoot','Invoke-RootMove','Register-MonitorTask','Protect-InstallFolder')},$false)) { Invoke-Expression $f.Extent.Text }
+foreach ($f in $ast.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in @('Get-FolderSizeText','Get-RemovableMonitor','Show-RemovableMonitor','Select-RemovableMonitor','Stop-MonitorProcess','Move-MonitorHistory','Remove-MonitorInstall','Invoke-UninstallFlow','Get-PreviousRootMonitor','Move-MonitorToNewRoot','Invoke-RootMove','Register-MonitorTask','Protect-InstallFolder','Get-TaskScriptFolder','Get-MonitorTask','Get-FolderTaskClash','Invoke-LegacyMigration')},$false)) { Invoke-Expression $f.Extent.Text }
 $uRoot = Join-Path $InstallDir 'uninstall'
 # A real install in the old location on this machine must never leak into these listings, and neither can a real
 # HSTProbe folder or its task: every default this section relies on is pinned to somewhere that does not exist.
@@ -1698,6 +1854,28 @@ Check "U6 a file held open keeps the folder and names the failure, history still
 $uLockRes2 = Remove-MonitorInstall -Monitor @(Get-RemovableMonitor -Root $uRoot -Path $uTaskPath)[0] -KeepHistory $true -KeepRoot $uKeep
 Check "U6 running it again once the lock is gone finishes the removal" ($uLockRes2.FolderRemoved -and @($uLockRes2.Problems).Count -eq 0 -and -not (Test-Path $uLock))
 
+# A removal aimed at a folder that holds other monitors would take all of them with it
+UReset $uRoot
+$uKeepA = UMonitor -Name 'Keep A' -Root $uRoot
+$uKeepB = UMonitor -Name 'Keep B' -Root $uRoot
+$script:ULogs = @()
+$uRootAimed = Remove-MonitorInstall -Monitor ([PSCustomObject]@{ Name = '___'; Slug = ''; Dir = $uRoot; Url = ''; Kind = 'TaskOnly'; TaskName = 'Curl Monitor - ___'; TaskPath = $uTaskPath; TaskState = 'no task' }) -KeepHistory $true -KeepRoot $uKeep
+Check "U11 a removal aimed at a folder holding other monitors takes nothing and says why" (-not $uRootAimed.FolderRemoved -and (Test-Path $uKeepA) -and (Test-Path $uKeepB) -and (Test-Path (Join-Path $uKeepA 'credential.bin')) -and @($uRootAimed.Problems).Count -eq 1 -and @($uRootAimed.Problems)[0] -match 'holds other monitors' -and $null -eq $uRootAimed.HistoryPath -and $uRootAimed.TaskRemoved)
+
+# Answering Y to keeping the history and then losing it anyway is the one outcome this must never produce
+UReset $uRoot
+$uKeepless = UMonitor -Name 'Keepless' -Root $uRoot
+$uBlocked = Join-Path $uRoot 'blocked-keep-root'
+Set-Content -Path $uBlocked -Value 'a file sits where the keep folder should be' -Encoding UTF8
+$script:ULogs = @()
+UAnswers @('Keepless', 'Y', 'Y')
+$rcKeepless = Invoke-UninstallFlow -Root $uRoot -Path $uTaskPath -KeepRoot (Join-Path $uBlocked 'keep')
+Check "U12 a keep location that cannot be written leaves the folder and its history alone" ($rcKeepless -eq 1 -and (Test-Path $uKeepless) -and (Test-Path (Join-Path $uKeepless 'Outages.csv')) -and (Test-Path (Join-Path $uKeepless ("Latency_" + (Get-Date -Format 'yyyyMM') + ".csv"))) -and (($script:ULogs -join "`n") -match 'was left in place because its history could not be moved'))
+Check "U12 and the summary says the history could not be kept rather than there being none" ((($script:UOut -join "`n") -match 'could not be kept in .*, so the folder was left alone'))
+UAnswers @('Keepless', 'Y', 'N')
+$rcKeepless2 = Invoke-UninstallFlow -Root $uRoot -Path $uTaskPath -KeepRoot (Join-Path $uBlocked 'keep')
+Check "U12 answering N to keeping it removes the folder as asked" ($rcKeepless2 -eq 0 -and -not (Test-Path $uKeepless))
+
 UReset $uRoot
 $null = UMonitor -Name 'Alpha' -Root $uRoot
 $null = UMonitor -Name 'Beta' -Root $uRoot
@@ -1708,6 +1886,35 @@ Check "U7 non-interactive with an unknown name refuses and removes nothing" ((In
 Check "U7 non-interactive with a name removes that one, then the last needs no name" ((Invoke-UninstallFlow -Requested 'Alpha' -KeepHistory $false -Root $uRoot -Path $uTaskPath -KeepRoot $uKeep) -eq 0 -and @(Get-RemovableMonitor -Root $uRoot -Path $uTaskPath)[0].Name -eq 'Beta' -and (Invoke-UninstallFlow -Requested '' -Root $uRoot -Path $uTaskPath -KeepRoot $uKeep) -eq 0 -and @(Get-RemovableMonitor -Root $uRoot -Path $uTaskPath).Count -eq 0)
 $NonInteractive = $false
 Check "U7 a run with nothing installed says so and changes nothing" ((Invoke-UninstallFlow -Root $uRoot -Path $uTaskPath -KeepRoot $uKeep) -eq 0)
+
+UReset $uRoot
+$null = UMonitor -Name '2' -Root $uRoot -Url 'https://two.invalid/'
+$null = UMonitor -Name 'Alpha' -Root $uRoot -Url 'https://alpha.invalid/'
+$NonInteractive = $false
+$uNum = @(Get-RemovableMonitor -Root $uRoot -Path $uTaskPath -LegacyDir (Join-Path $uRoot 'none') -LegacyTask 'No Legacy Task')
+UAnswers @('2', 'Y', 'N')
+Check "U10 a monitor really called '2' is the one removed, not whatever sits on the second row" ((Invoke-UninstallFlow -Root $uRoot -Path $uTaskPath -KeepRoot $uKeep) -eq 0 -and @($uNum).Count -eq 2 -and -not (Test-Path (Join-Path $uRoot '2')) -and (Test-Path (Join-Path $uRoot 'Alpha')))
+UAnswers @('Alpha', 'Y', 'N')
+Check "U10 the monitor a numeric name displaced is still reached by its own name" ((Invoke-UninstallFlow -Root $uRoot -Path $uTaskPath -KeepRoot $uKeep) -eq 0 -and -not (Test-Path (Join-Path $uRoot 'Alpha')))
+UAnswers @('1', 'Y', 'N')
+$null = UMonitor -Name 'Bravo' -Root $uRoot
+$null = UMonitor -Name 'Charlie' -Root $uRoot
+Check "U10 a number nothing is called still picks that row" ((Invoke-UninstallFlow -Root $uRoot -Path $uTaskPath -KeepRoot $uKeep) -eq 0 -and -not (Test-Path (Join-Path $uRoot 'Bravo')) -and (Test-Path (Join-Path $uRoot 'Charlie')))
+
+# Two monitors carrying the same number for a name: the number has to stay a row number, or one of the two
+# could never be reached, by number or by name.
+UReset $uRoot
+foreach ($slug in @('first','second')) {
+  $dir = Join-Path $uRoot $slug
+  New-Item $dir -ItemType Directory -Force | Out-Null
+  @{ MonitorName='1'; Url="https://$slug.invalid/"; SiteName='S' } | ConvertTo-Json | Set-Content (Join-Path $dir 'install-settings.json') -Encoding UTF8
+  foreach ($f in @('Watch-CurlMonitor.ps1','Drops.log')) { Set-Content (Join-Path $dir $f) -Value 'x' -Encoding UTF8 }
+}
+$uDup = @(Get-RemovableMonitor -Root $uRoot -Path $uTaskPath -LegacyDir (Join-Path $uRoot 'none') -LegacyTask 'No Legacy Task')
+UAnswers @('1', 'Y', 'N')
+Check "U10 two monitors sharing a numeric name are both still reachable" (@($uDup).Count -eq 2 -and @(@($uDup) | Where-Object { $_.Name -eq '1' }).Count -eq 2 -and (Invoke-UninstallFlow -Root $uRoot -Path $uTaskPath -KeepRoot $uKeep) -eq 0 -and -not (Test-Path (Join-Path $uRoot 'first')) -and (Test-Path (Join-Path $uRoot 'second')))
+UAnswers @('1', 'Y', 'N')
+Check "U10 and the second one goes the same way on the next run" ((Invoke-UninstallFlow -Root $uRoot -Path $uTaskPath -KeepRoot $uKeep) -eq 0 -and -not (Test-Path (Join-Path $uRoot 'second')))
 
 UReset $uRoot
 $uEvilDir = Join-Path $uRoot 'evil'
@@ -1735,7 +1942,7 @@ function Write-Log { param($Level,$Message) }
 
 Section "N. The install root, the move out of the old location, and the shorter questions"
 $nRoot = [System.IO.Path]::GetFullPath((Join-Path $InstallDir 'rootmove'))
-$nTaskPath = '\CurlMonitorTest\'
+$nTaskPath = "\CurlMonitorTest$PID\"
 function NDropTask { param([string]$Name) try { Unregister-ScheduledTask -TaskPath $nTaskPath -TaskName $Name -Confirm:$false -ErrorAction Stop } catch { } }
 # A run that died mid-section could have left a task here, which would make the checks below read machine state
 foreach ($stale in @(Get-ScheduledTask -TaskPath $nTaskPath -ErrorAction SilentlyContinue)) { NDropTask -Name $stale.TaskName }
@@ -1786,6 +1993,11 @@ $nRemovable = @(Get-RemovableMonitor -Root $nNew -Path $nTaskPath -LegacyDir (Jo
 Check "N6 the removal listing reaches the old location as well as the new one" (@($nRemovable | Where-Object { $_.Kind -eq 'OldLocation' }).Count -eq 1 -and @($nRemovable | Where-Object { $_.Kind -eq 'OldLocation' })[0].Dir -eq $nDir2 -and @($nRemovable | Where-Object { $_.Kind -eq 'Monitor' }).Count -eq 1)
 
 Check "N7 every question is one short line with the answer on the next" ($src -match 'function Write-Question' -and $src -match 'Write-Question -Question "Install or uninstall\?"' -and $src -match 'Write-Question -Question "Monitor name"' -and $src -match 'Write-Question -Question "URL to watch"' -and $src -match 'Write-Question -Question "Site name"' -and $src -match 'Write-Question -Question "Text the page must contain \(optional\)"')
+Check "N13 the task name limit follows the task folder in use rather than a number that fits the shipped one" ($src -match '(?m)^\$MaxTaskNameLength\s+=\s+\[math\]::Max\(1, 256 - \(\(Join-Path \$env:SystemRoot ''System32\\Tasks''\) \+ \$TaskPath\)\.Length\)$' -and $src.IndexOf('$TaskPath              = "\CurlMonitor\"') -lt $src.IndexOf('$MaxTaskNameLength') -and $MaxTaskNameLength -eq 218)
+Check "N13 a name one character past the limit is refused and one at it is taken" ((Test-MonitorNameLength ('a' * ($MaxTaskNameLength - $TaskNamePrefix.Length))) -and -not (Test-MonitorNameLength ('a' * ($MaxTaskNameLength - $TaskNamePrefix.Length + 1))))
+Check "N13 an upgrade stops a monitor process that outlived its task before it writes over its script" ($src.IndexOf('$null = Stop-MonitorProcess -Dir $InstallDir') -gt 0 -and $src.IndexOf('$null = Stop-MonitorProcess -Dir $InstallDir') -lt $src.IndexOf('Move-Item -Path $stagedPath'))
+Check "N13 a carried mail secret goes when this install sends none" ($src -match "if \(-not \(\`$mail\.MailMethod -in @\('Authenticated','Graph'\) -and \`$mail\.CipherText\)\) \{" -and $src -match 'Removed the carried mail secret')
+Check "N13 the telemetry warning reads the root out of the publisher's own task" ($src.Contains('[regex]::Match("$($telemetry.Actions[0].Arguments)"') -and $src -match 'Re-run Install-TelemetryPublisher\.ps1 so it reads' -and $src -match 'if \(-not \$reads -or \$reads\.TrimEnd\(''\\''\) -eq \$OldRoot\.TrimEnd\(''\\''\)\)')
 Check "N7 no question prints a paragraph through the transcript log any more" (-not ($src -match 'Write-Log -Level PROMPT -Message "Name this monitor') -and -not ($src -match 'Write-Log -Level PROMPT -Message "Enter the URL') -and -not ($src -match 'Write-Log -Level PROMPT -Message "Text that must appear') -and -not ($src -match 'Write-Log -Level PROMPT -Message "Enter the site name'))
 $script:NOut = @()
 $NonInteractive = $true
@@ -1828,9 +2040,21 @@ $NonInteractive = $false
 $MonitorName = ''
 Check "N10 a non-interactive run refuses a name that is still installed somewhere else" ($nRefused -eq '' -and (($script:NLogs -join "`n") -match 'two monitors on the same URL'))
 $script:NOut = @()
+# M is only offered for a folder the move understands, so the entry has to be one
+New-Item (Join-Path $nOld 'GitHub-Monitor') -ItemType Directory -Force | Out-Null
+Set-Content (Join-Path $nOld 'GitHub-Monitor\Watch-CurlMonitor.ps1') -Value "'polling'" -Encoding UTF8
 UAnswers @('GitHub Monitor', 'N', 'Something Else')
 $nTyped = Get-MonitorName -SavedDefault '' -Existing @() -Elsewhere $nAway
 Check "N10 typing that name interactively offers to move it, and N asks for another name" ($nTyped -eq 'Something Else' -and (($script:NOut -join "`n") -match 'Move it here first\?') -and (($script:NOut -join "`n") -match 'still in '))
+# The older layout holds no 'Watch-CurlMonitor.ps1', and the move always refused it, so M is never offered for it
+$nOlder = @([PSCustomObject]@{ Name = 'HST eChart'; Slug = 'HST-eChart'; Dir = (Join-Path $nRoot 'older-layout'); Url = 'https://old.invalid/x'; TaskName = 'HST eChart Monitor'; TaskPath = '\NoSuchPrevPath\'; HasTask = $true })
+New-Item (Join-Path $nRoot 'older-layout') -ItemType Directory -Force | Out-Null
+Set-Content (Join-Path $nRoot 'older-layout\Watch-HSTeChartUptime.ps1') -Value "'older'" -Encoding UTF8
+$script:NOut = @()
+$script:NLogs = @()
+UAnswers @('HST eChart', 'Another Name')
+$nOlderTyped = Get-MonitorName -SavedDefault '' -Existing @() -Elsewhere $nOlder
+Check "N10 the older layout is not offered a move this run cannot make, and says what does work" ($nOlderTyped -eq 'Another Name' -and -not (($script:NOut -join "`n") -match 'Move it here first\?') -and (($script:NLogs -join "`n") -match 'answer Y when it offers to move the older install'))
 
 # What the move itself leaves: the task it registered, at the new path, under the name it was given
 $nLeftTask = Get-ScheduledTask -TaskName 'Curl Monitor - HST eChart' -TaskPath $nTaskPath -ErrorAction SilentlyContinue
@@ -1850,11 +2074,87 @@ $script:NOut = @()
 Show-RemovableMonitor -Items @($null)
 Check "N11 the removal listing prints no blank row for a null entry" (@($script:NOut).Count -eq 0)
 
+# A folder whose settings file is gone is still a monitor: its task is polling out of the old root, and a move
+# that cannot see it would leave it there for good.
+$nNoSettings = Join-Path $nOld 'No-Settings'
+New-Item $nNoSettings -ItemType Directory -Force | Out-Null
+Set-Content (Join-Path $nNoSettings 'Watch-CurlMonitor.ps1') -Value "`$InstallDir = '$nNoSettings'`r`n'polling'" -Encoding UTF8
+$nDataOnly = Join-Path $nOld 'Data-Only'
+New-Item $nDataOnly -ItemType Directory -Force | Out-Null
+Set-Content (Join-Path $nDataOnly 'Drops.log') -Value 'x' -Encoding UTF8
+$nHidden = Join-Path $nOld 'Hidden-Monitor'
+New-Item $nHidden -ItemType Directory -Force | Out-Null
+Set-Content (Join-Path $nHidden 'Watch-CurlMonitor.ps1') -Value "'polling'" -Encoding UTF8
+(Get-Item $nHidden -Force).Attributes = 'Directory, Hidden'
+$nInstalled = @(Get-InstalledMonitor -Root $nOld)
+Check "N12 a folder holding a monitor but no settings file counts as installed, and one holding only data does not" (@(@($nInstalled) | Where-Object { $_.Path -eq $nNoSettings -and $_.Name -eq 'No-Settings' -and $_.Url -eq '' }).Count -eq 1 -and @(@($nInstalled) | Where-Object { $_.Path -eq $nDataOnly }).Count -eq 0 -and @(@($nInstalled) | Where-Object { $_.Path -eq $nHidden }).Count -eq 1)
+(Get-Item $nHidden -Force).Attributes = 'Directory'
+Remove-Item $nHidden -Recurse -Force
+Register-MonitorTask -Name 'Curl Monitor - Settings Gone' -Path $nTaskPath -ScriptPath (Join-Path $nNoSettings 'Watch-CurlMonitor.ps1')
+$nByTask = @(@(Get-PreviousRootMonitor -Root $nOld -Path $nTaskPath -NewRoot $nNew) | Where-Object { $_.Dir -eq $nNoSettings })
+Check "N12 a monitor in the old location with no settings file is found, and takes its name from its own task" (@($nByTask).Count -eq 1 -and @($nByTask)[0].Name -eq 'Settings Gone' -and @($nByTask)[0].Slug -eq 'No-Settings' -and @($nByTask)[0].HasTask -and @($nByTask)[0].TaskName -eq 'Curl Monitor - Settings Gone')
+Check "N12 it reads as an old-location monitor in the removal listing, not as a stray folder" (@(@(Get-RemovableMonitor -Root $nNew -Path $nTaskPath -LegacyDir (Join-Path $nRoot 'none') -LegacyTask 'No Legacy Task' -PrevRoot $nOld -PrevPath $nTaskPath) | Where-Object { $_.Dir -eq $nNoSettings -and $_.Kind -eq 'OldLocation' }).Count -eq 1)
+$script:NLogs = @()
+$nMovedBare = Move-MonitorToNewRoot -Monitor @($nByTask)[0] -NewRoot $nNew -NewTaskPath $nTaskPath
+Check "N12 and it moves, keeping its folder name and its task name" ($nMovedBare -and (Test-Path (Join-Path $nNew 'No-Settings\Watch-CurlMonitor.ps1')) -and -not (Test-Path $nNoSettings))
+NDropTask -Name 'Curl Monitor - Settings Gone'
+
+# A task in the old location whose folder has been deleted is nothing to move, only something to remove
+$nOrphanDir = Join-Path $nOld 'Orphan-Task'
+New-Item $nOrphanDir -ItemType Directory -Force | Out-Null
+Set-Content (Join-Path $nOrphanDir 'Watch-CurlMonitor.ps1') -Value "'polling'" -Encoding UTF8
+Register-MonitorTask -Name 'Curl Monitor - Orphan Task' -Path $nTaskPath -ScriptPath (Join-Path $nOrphanDir 'Watch-CurlMonitor.ps1')
+Remove-Item $nOrphanDir -Recurse -Force
+$nOrphanFound = @(@(Get-PreviousRootMonitor -Root $nOld -Path $nTaskPath -NewRoot $nNew) | Where-Object { $_.TaskName -eq 'Curl Monitor - Orphan Task' })
+$nOrphanList = @(@(Get-RemovableMonitor -Root $nNew -Path $nTaskPath -LegacyDir (Join-Path $nRoot 'none') -LegacyTask 'No Legacy Task' -PrevRoot $nOld -PrevPath $nTaskPath) | Where-Object { $_.TaskName -eq 'Curl Monitor - Orphan Task' })
+Check "N12 a task in the old location with no folder left is not offered for the move, but is still listed for removal" (@($nOrphanFound).Count -eq 0 -and @($nOrphanList).Count -eq 1 -and @($nOrphanList)[0].Kind -eq 'TaskOnly')
+Check "N12 a stray task is listed with the folder it really runs, not one guessed from its name" (@($nOrphanList)[0].Dir -eq $nOrphanDir -and @($nOrphanList)[0].Slug -eq 'Orphan-Task')
+Check "N12 the install stops rather than putting a second task on one folder" ($src -match "Write-Log -Level FAILED -Message ""'\`$TaskPath\`$folderClash' already runs out of" -and $src -match '(?s)already runs out of.{0,400}?Nothing was installed\. Exiting\."\s*\r?\n\s*exit 1')
+NDropTask -Name 'Curl Monitor - Orphan Task'
+
+# Two tasks on one folder would both poll and both write the same files
+$nClashDir = Join-Path $nNew 'Clash-Folder'
+New-Item $nClashDir -ItemType Directory -Force | Out-Null
+Set-Content (Join-Path $nClashDir 'Watch-CurlMonitor.ps1') -Value "'polling'" -Encoding UTF8
+Register-MonitorTask -Name 'Curl Monitor - Clash  Folder' -Path $nTaskPath -ScriptPath (Join-Path $nClashDir 'Watch-CurlMonitor.ps1')
+Check "N12 the task already running out of a folder is found, whatever it is called" ((Get-FolderTaskClash -Dir $nClashDir -Path $nTaskPath) -eq 'Curl Monitor - Clash  Folder')
+Check "N12 the task this run would register itself is not treated as a clash" ((Get-FolderTaskClash -Dir $nClashDir -Path $nTaskPath -Exclude 'Curl Monitor - Clash  Folder') -eq '')
+Check "N12 a folder nothing runs out of has no clash" ((Get-FolderTaskClash -Dir (Join-Path $nNew 'nothing-here') -Path $nTaskPath) -eq '')
+# The folder is read out of the task's own argument string, whatever shape a hand-edited task left it in
+function NFakeTask { param([string]$Arguments) [PSCustomObject]@{ TaskName = 'Curl Monitor - Fake'; Actions = @([PSCustomObject]@{ Arguments = $Arguments }) } }
+Check "N12 the folder is read from a quoted or an unquoted -File, and nothing is invented when there is none" (
+  (Get-TaskScriptFolder -Task (NFakeTask '-NoProfile -ExecutionPolicy Bypass -File "C:\ProgramData\CurlMonitor\Alpha\Watch-CurlMonitor.ps1"')) -eq 'C:\ProgramData\CurlMonitor\Alpha' -and
+  (Get-TaskScriptFolder -Task (NFakeTask '-NoProfile -File C:\ProgramData\CurlMonitor\Beta\Watch-CurlMonitor.ps1')) -eq 'C:\ProgramData\CurlMonitor\Beta' -and
+  (Get-TaskScriptFolder -Task (NFakeTask '-NoProfile -Command "& { exit }"')) -eq '' -and
+  (Get-TaskScriptFolder -Task (NFakeTask '')) -eq '' -and
+  (Get-TaskScriptFolder -Task ([PSCustomObject]@{ TaskName = 'Curl Monitor - None'; Actions = @() })) -eq '')
+Check "N12 the install asks before it writes, and only takes over a name that lands in that same folder" ($src.IndexOf('$folderClash = Get-FolderTaskClash -Dir $InstallDir -Path $TaskPath -Exclude $TaskName') -gt 0 -and $src.IndexOf('$folderClash = Get-FolderTaskClash') -lt $src.IndexOf('Created install directory') -and $src -match "if \(\(ConvertTo-MonitorSlug \`$clashName\) -eq \(ConvertTo-MonitorSlug \`$MonitorName\)\)")
+NDropTask -Name 'Curl Monitor - Clash  Folder'
+
+# The migration says what it actually did rather than asserting history came across
+$nLegacyDest = Join-Path $nRoot 'legacy-dest'
+New-Item $nLegacyDest -ItemType Directory -Force | Out-Null
+$script:NLogs = @()
+$script:LegacyCarried = -1
+$nNothingToCarry = Invoke-LegacyMigration -Legacy ([PSCustomObject]@{ Dir = (Join-Path $nRoot 'legacy-gone'); TaskName = 'No Legacy Task'; TaskPath = $nTaskPath; HasTask = $false }) -Destination $nLegacyDest
+Check "N13 a migration with nothing to carry says so and counts nothing" ($nNothingToCarry -and $script:LegacyCarried -eq 0 -and (($script:NLogs -join "`n") -match 'nothing to carry over'))
+$nLegacyFull = Join-Path $nRoot 'legacy-full'
+New-Item $nLegacyFull -ItemType Directory -Force | Out-Null
+Set-Content (Join-Path $nLegacyFull 'HST-eChart-Outages.csv') -Value 'a,b' -Encoding UTF8
+Set-Content (Join-Path $nLegacyFull 'HST-eChart-Latency_202609.csv') -Value 'rows' -Encoding UTF8
+$script:NLogs = @()
+$nDidCarry = Invoke-LegacyMigration -Legacy ([PSCustomObject]@{ Dir = $nLegacyFull; TaskName = 'No Legacy Task'; TaskPath = $nTaskPath; HasTask = $false }) -Destination $nLegacyDest
+Check "N13 what it did carry is counted, renamed, and the old folder is gone" ($nDidCarry -and $script:LegacyCarried -eq 2 -and (Test-Path (Join-Path $nLegacyDest 'Outages.csv')) -and (Test-Path (Join-Path $nLegacyDest 'Latency_202609.csv')) -and -not (Test-Path $nLegacyFull))
+Check "N13 the finish line branches on whether anything came across" ($src -match 'Migration complete: \$\(\$script:LegacyCarried\) file\(s\) from' -and $src -match 'There was nothing in it to carry over')
+
 NDropTask -Name 'Curl Monitor - HST eChart'
-Check "N8 this section leaves none of its own tasks behind" ($null -eq (Get-ScheduledTask -TaskName 'Curl Monitor - HST eChart' -TaskPath $nTaskPath -ErrorAction SilentlyContinue))
+Check "N8 this section leaves none of its own tasks behind" (@(Get-ScheduledTask -TaskPath $nTaskPath -ErrorAction SilentlyContinue).Count -eq 0)
 Remove-Item function:Write-Host -ErrorAction SilentlyContinue
 function Write-Log { param($Level,$Message) }
 Remove-Item $nRoot -Recurse -Force -ErrorAction SilentlyContinue
+
+# Nothing this run wrote is left behind. A run that failed keeps its folders so they can be looked at.
+if (-not $script:fail) { Remove-Item $scratchRoot -Recurse -Force -ErrorAction SilentlyContinue }
 
 Write-Host ""
 Write-Host "TOTAL: $script:pass passed, $script:fail failed"

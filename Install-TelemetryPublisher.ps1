@@ -291,8 +291,9 @@ if (-not $NonInteractive) {
         $RepoUrl = Read-Setting -Prompt 'Repository URL (https://github.com/owner/repo)' -Default $(if ($RepoUrl) { $RepoUrl } elseif ($saved) { [string]$saved.RepoUrl } else { '' })
         if (-not (Test-RepoUrl $RepoUrl)) { Write-Log -Level WARNING -Message 'Enter an https repository URL, for example https://github.com/owner/repo.' }
     }
-    $RepoPath = Read-Setting -Prompt 'Working copy path' -Default $(if ($saved -and $saved.RepoPath) { [string]$saved.RepoPath } else { $RepoPath })
-    $MonitorRoot = Read-Setting -Prompt 'Monitor root to read' -Default $(if ($saved -and $saved.MonitorRoot) { [string]$saved.MonitorRoot } else { $MonitorRoot })
+    # A value passed on the command line wins over the saved one, or re-running this to repoint it does nothing
+    $RepoPath = Read-Setting -Prompt 'Working copy path' -Default $(if ($PSBoundParameters.ContainsKey('RepoPath')) { $RepoPath } elseif ($saved -and $saved.RepoPath) { [string]$saved.RepoPath } else { $RepoPath })
+    $MonitorRoot = Read-Setting -Prompt 'Monitor root to read' -Default $(if ($PSBoundParameters.ContainsKey('MonitorRoot')) { $MonitorRoot } elseif ($saved -and $saved.MonitorRoot) { [string]$saved.MonitorRoot } else { $MonitorRoot })
     while (-not $AuthorName) { $AuthorName = Read-Setting -Prompt 'Commit author name' -Default $(if ($saved) { [string]$saved.AuthorName } else { '' }) }
     Write-Log -Level INFORMATIONAL -Message 'The author email has to be one attached to the GitHub account, or the commits will not count as contributions.'
     while (-not (Test-EmailLike $AuthorEmail)) {

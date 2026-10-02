@@ -116,7 +116,12 @@ function Get-TelemetryRow {
     # Latency rows inside the window, read from the monthly files the window can touch
     param([Parameter(Mandatory)][string]$Folder, [Parameter(Mandatory)][datetime]$From, [Parameter(Mandatory)][datetime]$To)
     $rows = New-Object System.Collections.ArrayList
-    $months = @($From.ToString('yyyyMM'), $To.ToString('yyyyMM')) | Sort-Object -Unique
+    # Every month the window touches, not only its two ends: a window left unpublished for a while spans more
+    # than two, and skipping the middle ones publishes a figure with most of its polls missing.
+    $months = New-Object System.Collections.ArrayList
+    $cursor = [datetime]::new($From.Year, $From.Month, 1)
+    $last   = [datetime]::new($To.Year, $To.Month, 1)
+    while ($cursor -le $last) { [void]$months.Add($cursor.ToString('yyyyMM')); $cursor = $cursor.AddMonths(1) }
     foreach ($m in $months) {
         $file = Join-Path $Folder "Latency_$m.csv"
         if (-not (Test-Path -LiteralPath $file)) { continue }
@@ -161,8 +166,10 @@ function Get-TelemetryStat {
     $sorted = $ok.ToArray()
     $outageCount = 0; $longest = 0; $total = 0
     foreach ($o in @($Outages)) {
-        $start = ConvertFrom-LocalStamp $o.OutageStart_Local
-        if (-not $start -or $start -le $From -or $start -gt $To) { continue }
+        # The monitor writes this row when the endpoint comes back, so the recovery is what decides the window.
+        # Choosing by the start dropped any outage running across a publish time, in both windows.
+        $end = ConvertFrom-LocalStamp $o.OutageEnd_Local
+        if (-not $end -or $end -le $From -or $end -gt $To) { continue }
         $outageCount++
         $seconds = 0
         [void][int]::TryParse("$($o.DurationSeconds)", [ref]$seconds)
@@ -443,10 +450,14 @@ function Publish-Window {
     $dayAgo = $Now.AddHours(-24)
     $recent = @($published | Where-Object { $t = ConvertFrom-LocalStamp $_.WindowEnd_Local; $t -and $t -gt $dayAgo } | Group-Object Endpoint | ForEach-Object {
             $set = @($_.Group)
+            # Availability over the day is the polls that answered out of the polls taken. Averaging the window
+            # percentages instead made the figure disagree with the poll count printed beside it.
+            $setPolls = (@($set | ForEach-Object { [int]$_.Polls }) | Measure-Object -Sum).Sum
+            $setFailed = (@($set | ForEach-Object { [int]$_.FailedPolls }) | Measure-Object -Sum).Sum
             [PSCustomObject]@{
                 Endpoint            = $_.Name
-                Polls               = (@($set | ForEach-Object { [int]$_.Polls }) | Measure-Object -Sum).Sum
-                AvailabilityPercent = [math]::Round((@($set | ForEach-Object { [double]$_.AvailabilityPercent }) | Measure-Object -Average).Average, 2)
+                Polls               = $setPolls
+                AvailabilityPercent = $(if ($setPolls -gt 0) { [math]::Round(100 * ($setPolls - $setFailed) / $setPolls, 2) } else { 0 })
                 P50Ms               = (@($set | ForEach-Object { [int]$_.P50Ms }) | Measure-Object -Maximum).Maximum
                 P95Ms               = (@($set | ForEach-Object { [int]$_.P95Ms }) | Measure-Object -Maximum).Maximum
                 Outages             = (@($set | ForEach-Object { [int]$_.Outages }) | Measure-Object -Sum).Sum

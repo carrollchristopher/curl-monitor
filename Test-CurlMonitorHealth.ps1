@@ -138,7 +138,10 @@ function Get-RecentPoll {
         foreach ($r in (@($header) + $tail | ConvertFrom-Csv)) {
             $t = [datetime]::MinValue
             if (-not [datetime]::TryParseExact("$($r.Timestamp_Local)", 'yyyy-MM-dd HH:mm:ss', $inv, [Globalization.DateTimeStyles]::None, [ref]$t) -or $t -lt $cutoff) { continue }
-            $failed = ($r.HttpCode -ne '200' -or $r.ContentOk -ne 'True' -or [string]::IsNullOrEmpty($r.TotalMs))
+            # curl can fail after the 200 header arrives, so its exit code decides the poll the same way the
+            # monitor decides it. A blank exit column is a row from before it was recorded, not a failure.
+            $exitBad = (-not [string]::IsNullOrWhiteSpace("$($r.CurlExit)")) -and "$($r.CurlExit)".Trim() -ne '0'
+            $failed = ($exitBad -or $r.HttpCode -ne '200' -or $r.ContentOk -ne 'True' -or [string]::IsNullOrEmpty($r.TotalMs))
             [void]$rows.Add([PSCustomObject]@{ When = $t; Timestamp_Local = $r.Timestamp_Local; HttpCode = $r.HttpCode; TotalMs = $r.TotalMs; Reason = $r.Reason; Failed = $failed })
         }
     }
@@ -444,7 +447,9 @@ function Invoke-MonitorCheck {
     if (-not $TaskName) { $TaskName = "Curl Monitor - $($cfg.MonitorName)" }
     foreach ($k in @('IntervalSeconds', 'TimeoutSeconds', 'DownThreshold', 'SlowThresholdMs', 'MaxRedirects', 'MinPopulatedBytes')) { if ($null -eq $cfg[$k]) { $cfg[$k] = @{ IntervalSeconds = 10; TimeoutSeconds = 15; DownThreshold = 3; SlowThresholdMs = 3000; MaxRedirects = 5; MinPopulatedBytes = 1000 }[$k] } }
     $staleAfter = [int]$cfg.IntervalSeconds + [int]$cfg.TimeoutSeconds + 30
-    $busyAfter = $staleAfter + 600
+    # Only a send in progress can hold a poll up, and the mail path is capped at 100 s. A monitor with alerts off
+    # has no send to be waiting on, so there is nothing to excuse.
+    $busyAfter = if ($cfg.SendEmail) { $staleAfter + 150 } else { $staleAfter }
     Write-Check INFO "Monitor '$($cfg.MonitorName)' at site '$($cfg.SiteName)' polls $($cfg.Url) every $($cfg.IntervalSeconds) s with a $($cfg.TimeoutSeconds) s timeout, declares DOWN after $($cfg.DownThreshold) failures in a row, and $(if ("$($cfg.MailMethod)" -eq 'None') { 'sends no alerts' } else { "alerts by $($cfg.MailMethod) to $(@($cfg.MailTo) -join ', ')" })."
     if ($null -eq $cfg.SlowWindowMinutes) { Write-Check WARN "This monitor was installed before slow alerts and daily summaries existed. Re-run Install-CurlMonitor.ps1 to add them." }
     else {
@@ -667,7 +672,8 @@ function Get-MonitorFolder {
     # Monitor folders under the root, newest install layout only: a folder with a generated monitor in it
     param([Parameter(Mandatory)][string]$Root)
     if (-not (Test-Path $Root)) { return @() }
-    return @(Get-ChildItem -Path $Root -Directory -ErrorAction SilentlyContinue |
+    # -Force so a folder someone marked hidden is still checked, the same way the installer reads them
+    return @(Get-ChildItem -Path $Root -Directory -Force -ErrorAction SilentlyContinue |
         Where-Object { Test-Path (Join-Path $_.FullName 'Watch-CurlMonitor.ps1') } |
         ForEach-Object {
             $name = $_.Name
@@ -710,8 +716,10 @@ else {
     }
 }
 if (-not $InstallDir) {
-    $known = @(@($allFolders) + @($leftBehind) | ForEach-Object { $_.Slug })
-    foreach ($dir in @(Get-ChildItem -Path $InstallRoot -Directory -ErrorAction SilentlyContinue)) {
+    # Only what was found under this root counts as known: a folder in the old location can never be a child of
+    # it, and counting it here hid a broken install of the same name, which is the part-way-through-a-move case.
+    $known = @(@($allFolders) | ForEach-Object { $_.Slug })
+    foreach ($dir in @(Get-ChildItem -Path $InstallRoot -Directory -Force -ErrorAction SilentlyContinue)) {
         if ($known -contains $dir.Name) { continue }
         if (Test-Path (Join-Path $dir.FullName 'install-settings.json')) {
             Write-Check FAIL "'$($dir.FullName)' holds a monitor's settings but no Watch-CurlMonitor.ps1. That install is broken: re-run the installer for it, or remove it with the installer's uninstall option."
