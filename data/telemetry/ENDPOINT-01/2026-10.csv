@@ -1,3 +1,4 @@
 "WindowEnd_Local","Window","Endpoint","UrlHash","Polls","AvailabilityPercent","FailedPolls","SlowPolls","P50Ms","P95Ms","MaxMs","Outages","LongestOutageSeconds","TotalOutageSeconds","SlowPeriods","BackendAddresses","FailureReasons"
 "2026-10-01 07:15:02","Morning","ENDPOINT-01","b83b5c8fa601","4741","97.17","134","1","416","576","11193","0","0","0","0","3","DNS resolution failed x121; Timed out x13"
 "2026-10-01 17:15:05","Evening","ENDPOINT-01","b83b5c8fa601","3383","99.94","2","0","415","592","2600","0","0","0","0","3","Timed out x2"
+"2026-10-02 07:15:02","Morning","ENDPOINT-01","b83b5c8fa601","4759","99.71","14","1","410","531","11255","1","59","59","0","3","Connection refused or unreachable x8; Timed out x6"
