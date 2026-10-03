@@ -115,11 +115,11 @@ Install a monitor with `$AlertsEnabled = $false` in the config block for a telem
 wizard, no alerts, no stored credential, and every poll, outage and slow period still recorded.
 
 <!-- telemetry:start -->
-Last 24 hours, measured to 2026-10-02 17:15 local.
+Last 24 hours, measured to 2026-10-03 13:06 local.
 
 | Endpoint | Polls | Available | p50 | p95 | Outages |
 |---|---:|---:|---:|---:|---:|
-| ENDPOINT-01 | 11559 | 96.58% | 415 ms | 592 ms | 2 |
+| ENDPOINT-01 | 5559 | 89.75% | 388 ms | 2944 ms | 3 |
 <!-- telemetry:end -->
 
 ## Testing
