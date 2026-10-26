@@ -28,3 +28,4 @@
 "2026-10-24 17:15:02","Evening","ENDPOINT-01","b83b5c8fa601","3479","0","3479","0",,,,"0","0","0","0","0","HTTP 404 x3476; Timed out x3"
 "2026-10-25 13:23:07","Evening","ENDPOINT-01","b83b5c8fa601","2767","0","2767","0",,,,"0","0","0","0","0","HTTP 404 x2755; Timed out x7; HTTP 502 x2; DNS resolution failed x1; HTTP 504 x1; HTTP 503 x1"
 "2026-10-25 17:15:02","Evening","ENDPOINT-01","b83b5c8fa601","1333","0","1333","0",,,,"0","0","0","0","0","HTTP 404 x1331; DNS resolution failed x1; Timed out x1"
+"2026-10-26 07:15:04","Morning","ENDPOINT-01","b83b5c8fa601","4887","0","4887","0",,,,"0","0","0","0","0","HTTP 404 x4755; DNS resolution failed x126; Timed out x5; Connection reset during receive x1"
