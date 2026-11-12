@@ -18,3 +18,4 @@
 "2026-11-10 16:15:03","Evening","ENDPOINT-01","b83b5c8fa601","3431","0","3431","0",,,,"0","0","0","0","0","HTTP 404 x3218; DNS resolution failed x212; Timed out x1"
 "2026-11-11 06:15:02","Morning","ENDPOINT-01","b83b5c8fa601","4831","0","4831","0",,,,"0","0","0","0","0","HTTP 404 x4463; DNS resolution failed x358; Timed out x9; TLS certificate not trusted x1"
 "2026-11-11 16:15:02","Evening","ENDPOINT-01","b83b5c8fa601","2368","0","2368","0",,,,"0","0","0","0","0","HTTP 404 x2365; Timed out x2; DNS resolution failed x1"
+"2026-11-12 06:15:02","Morning","ENDPOINT-01","b83b5c8fa601","3541","0","3541","0",,,,"0","0","0","0","0","HTTP 404 x3538; Timed out x2; Connection refused or unreachable x1"
